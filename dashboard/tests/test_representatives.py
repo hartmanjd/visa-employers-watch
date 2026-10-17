@@ -108,5 +108,25 @@ class RepresentativeTests(unittest.TestCase):
         self.assertEqual(queries.employer_representatives(self.con, 12), [])
 
 
+    def test_build_once_builds_each_result_once_under_concurrent_requests(self):
+        import threading, time
+        calls = []
+
+        @queries.build_once
+        def slow(x):
+            calls.append(x)
+            time.sleep(0.05)
+            return x * 2
+
+        out = []
+        threads = [threading.Thread(target=lambda: out.append(slow(3))) for _ in range(8)]
+        [t.start() for t in threads]
+        [t.join() for t in threads]
+        self.assertEqual((calls, out), ([3], [6] * 8))
+        self.assertTrue(slow.ready(3))
+        self.assertFalse(slow.ready(4))
+        queries.employer_representatives(self.con, 3)
+        self.assertTrue(queries.representatives_ready(self.con))
+
 if __name__ == "__main__":
     unittest.main()

@@ -21,6 +21,8 @@ class ApiTests(unittest.TestCase):
         cls.env.start()
         cls.client = TestClient(api.app)
         cls.client.__enter__()
+        api.q.warm_red_flags()  # build what the startup threads build, so tests don't race them
+        api.q.warm_representatives()
 
     @classmethod
     def tearDownClass(cls):
@@ -113,6 +115,13 @@ class ApiTests(unittest.TestCase):
     def test_employer_red_flags(self):
         d = self.client.get(f"/api/employers/{self.acme_tx()['employer_id']}").json()
         self.assertEqual(d["red_flags"], [])  # too few applications to count
+
+    def test_employer_page_skips_panels_still_being_built(self):
+        with mock.patch.object(api.q, "red_flags_ready", return_value=False), \
+             mock.patch.object(api.q, "representatives_ready", return_value=False):
+            d = self.client.get(f"/api/employers/{self.acme_tx()['employer_id']}").json()
+        self.assertEqual((d["red_flags"], d["representatives"]), (None, None))
+        self.assertTrue(d["cases"])
 
     def test_debarments(self):
         rows = self.client.get("/api/debarments").json()

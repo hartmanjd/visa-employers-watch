@@ -128,9 +128,10 @@ def employer(employer_id: int):
         return {"employer": e, "summary": q.summary(c, employer_id),
                 "same_tax_id": q.same_tax_id(c, employer_id), "cases": cases,
                 "case_years": q.case_years(c, employer_id), "profile": q.employer_profile(c, employer_id),
-                "red_flags": q.red_flags(c, employer_id),
+                # None while the server is still building these after a restart; the page skips them.
+                "red_flags": q.red_flags(c, employer_id) if q.red_flags_ready(c) else None,
                 "debarments": q.employer_debarments(c, employer_id),
-                "representatives": q.employer_representatives(c, employer_id)}
+                "representatives": q.employer_representatives(c, employer_id) if q.representatives_ready(c) else None}
     finally:
         c.close()
 

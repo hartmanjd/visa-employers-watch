@@ -1148,7 +1148,7 @@ route();
 // ---------- red flags ----------
 // Patterns in the employer's own applications, each shown against the same share for the whole program.
 function redFlagsPanel(flags, program) {
-  if (!flags.length) return "";
+  if (!flags || !flags.length) return "";
   const bar = (v, cls) => `<span class="rf-track"><span class="rf-fill ${cls}" style="width:${Math.max(1, 100 * v)}%"></span></span>`;
   return `<section class="card panel rf" style="margin-top:16px">
     <h3>Red flags in its applications</h3>

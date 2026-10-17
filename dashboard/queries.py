@@ -3,8 +3,25 @@
 Plain functions over a sqlite3 connection, returning lists of dicts, so they can
 be tested without a web server. See h1b-data/README.md for the tables.
 """
-import csv, datetime, gzip, hashlib, os, re, shutil, sqlite3, sys, urllib.request
+import csv, datetime, gzip, hashlib, os, re, shutil, sqlite3, sys, threading, urllib.request
 from functools import lru_cache
+
+
+def build_once(fn):
+    """Cache fn's result per arguments, and build each result only once even when several requests ask
+    for it at the same time (lru_cache would let each of them build its own copy)."""
+    cache, lock = {}, threading.Lock()
+
+    def wrapper(*args):
+        if args not in cache:
+            with lock:
+                if args not in cache:
+                    cache[args] = fn(*args)
+        return cache[args]
+    wrapper.ready = lambda *args: args in cache
+    wrapper.cache_clear = cache.clear
+    wrapper.__doc__ = fn.__doc__
+    return wrapper
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "h1b-data", "scripts"))
 from employer_keys import clean_name, fein as clean_fein  # noqa: E402
@@ -730,6 +747,11 @@ def _db_path(con):
     return con.execute("PRAGMA database_list").fetchone()[2]
 
 
+def red_flags_ready(con):
+    """True once the program baselines are built, so a page can skip the flags rather than wait."""
+    return _flag_baselines.ready(_db_path(con))
+
+
 def warm_red_flags(path=None):
     """Compute the program baselines ahead of the first employer page (they take a few seconds)."""
     con = connect(path)
@@ -739,7 +761,7 @@ def warm_red_flags(path=None):
         con.close()
 
 
-@lru_cache(maxsize=4)
+@build_once
 def _flag_baselines(db_key):
     con = connect(db_key)
     try:
@@ -875,16 +897,23 @@ def _db_key(con):
     return con.execute("PRAGMA database_list").fetchone()[2]
 
 
+def representatives_ready(con):
+    """True once the representative index is built, so a page can skip the panel rather than wait."""
+    db_key = _db_key(con)
+    return _rep_index.ready(db_key) and _debarred_ids.ready(db_key)
+
+
 def warm_representatives(path=None):
     """Build the representative index ahead of the first request (it takes a few seconds)."""
     con = connect(path)
     try:
         _rep_index(_db_key(con))
+        _debarred_ids(_db_key(con))
     finally:
         con.close()
 
 
-@lru_cache(maxsize=2)
+@build_once
 def _rep_index(db_key):
     """{kind: {key: {"names", "employers", "feins"}}} plus each employer's WHD case outcomes."""
     con = connect(db_key)
@@ -898,19 +927,19 @@ def _rep_index(db_key):
                 SELECT a.employer_id, {col("lawfirm_name_business_name")}, {col("lawfirm_business_fein")},
                        {either("agent_attorney_first_name", "attorney_agent_first_name")},
                        {either("agent_attorney_last_name", "attorney_agent_last_name")},
-                       {either("agent_attorney_state", "attorney_agent_state")}
-                FROM applications a"""):
-            eid, firm, ffein, first, last, st = r
+                       {either("agent_attorney_state", "attorney_agent_state")}, COUNT(*)
+                FROM applications a GROUP BY 1, 2, 3, 4, 5, 6"""):
+            eid, firm, ffein, first, last, st, n = r
             firm = (firm or "").strip()
             if firm:
                 key = firm_keys.get(firm)
                 if key is None:
                     key = firm_keys[firm] = firm_key(firm)
                 if key:
-                    _rep_add(reps["firm"], key, firm, eid, clean_fein(ffein))
+                    _rep_add(reps["firm"], key, firm, eid, n, clean_fein(ffein))
             pkey = person_key(first, last, st)
             if pkey:
-                _rep_add(reps["person"], pkey, pkey, eid, None, firm)
+                _rep_add(reps["person"], pkey, pkey, eid, n, None, firm)
         outcomes = {}
         for r in con.execute("""
                 SELECT m.employer_id, e.program, v.case_id, COALESCE(v.bw_atp_amt, 0),
@@ -925,16 +954,16 @@ def _rep_index(db_key):
         con.close()
 
 
-def _rep_add(group, key, name, employer_id, fein=None, firm=None):
+def _rep_add(group, key, name, employer_id, n=1, fein=None, firm=None):
     g = group.get(key)
     if g is None:
         g = group[key] = {"names": {}, "employers": {}, "feins": set(), "firms": {}}
-    g["names"][name] = g["names"].get(name, 0) + 1
-    g["employers"][employer_id] = g["employers"].get(employer_id, 0) + 1
+    g["names"][name] = g["names"].get(name, 0) + n
+    g["employers"][employer_id] = g["employers"].get(employer_id, 0) + n
     if fein:
         g["feins"].add(fein)
     if firm:
-        g["firms"][firm] = g["firms"].get(firm, 0) + 1
+        g["firms"][firm] = g["firms"].get(firm, 0) + n
 
 
 def _rep_summary(kind, key, g, idx, debarred):
@@ -960,7 +989,7 @@ def _rep_summary(kind, key, g, idx, debarred):
             "cases": len(cases), "back_wages": sum(cases.values())}
 
 
-@lru_cache(maxsize=2)
+@build_once
 def _debarred_ids(db_key):
     con = connect(db_key)
     try:
@@ -988,7 +1017,7 @@ def rep_baselines(con):
     return {"visa_violations": _program_rates(idx), "employers": len(idx["programs"])}
 
 
-@lru_cache(maxsize=4)
+@build_once
 def _rep_table(db_key, kind):
     idx = _rep_index(db_key)
     debarred = _debarred_ids(db_key)
