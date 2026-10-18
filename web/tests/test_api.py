@@ -110,7 +110,10 @@ class ApiTests(unittest.TestCase):
         page = self.client.get("/")
         self.assertEqual(page.status_code, 200)
         self.assertIn("Visa Employer Watch", page.text)
-        self.assertEqual(self.client.get("/app.js").status_code, 200)
+        self.assertEqual(page.headers["cache-control"], "no-cache")
+        script = self.client.get("/app.js")
+        self.assertEqual(script.status_code, 200)
+        self.assertEqual(script.headers["cache-control"], "no-cache")  # a new release's script is never stale
 
     def test_employer_red_flags(self):
         d = self.client.get(f"/api/employers/{self.acme_tx()['employer_id']}").json()
