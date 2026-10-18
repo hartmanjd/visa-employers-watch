@@ -45,9 +45,10 @@ Settings (environment variables, all optional):
 | Address | Page |
 | --- | --- |
 | `#/` | Employer lookup: search by name, trade name (DBA) or tax ID, or open an application by its DOL case number. Before a search it shows a small map of cases per 100 visa employers, headline totals and three starting points: the employers with the most back wages, employers whose WHD cases found violations of their own visa program and that still filed in FY2025, and the industries with the highest share of employers with a case |
-| `#/employer/<id>` | One employer: DOL flags, totals, red flags in its own applications (each with its counts and the same share across the program), linked cases by year, same tax ID elsewhere, its jobs, worksites, offered against prevailing wages and representatives, each linked WHD case with its match rule and source, and its visa applications |
+| `#/employer/<id>` | One employer: DOL flags, totals, red flags in its own applications (each with its counts and the same share across the program), linked cases by year, same tax ID elsewhere, its jobs, worksites, offered against prevailing wages and representatives, each linked WHD case with its match rule and source, its linked OSHA inspections (each citation with the standard broken, its type, workers exposed and the proposed and current penalty, accident reports with OSHA's written account, the match rule and a link to OSHA's page), and its visa applications |
 | `#/application/<case number>` | One application: headline job, workers, wages and dates, then every field of its DOL disclosure record by section |
 | `#/watchlist` | Every employer with linked WHD cases, sortable, with filters (program, state, industry, year, visa violations, applications) kept in the address |
+| `#/safety` | Every employer with linked OSHA inspections, sortable by penalties, citations, Serious, Willful or Repeat items and deaths, with its WHD back wages beside it; filters (program, state, industry, only employers with WHD cases too) kept in the address |
 | `#/map` | A tile map of states colored by cases per 100 visa employers, share with a case, back wages or case count, with top-state bars and a table |
 | `#/representatives` | Law firms, agent businesses and individual attorneys or agents, ranked by how many of their client employers have visa-program violations, with the rate against typical for the same mix of programs |
 | `#/representative/<kind>/<key>` | One firm or person: totals, spellings, tax IDs and every client employer with its WHD record. Employer pages link here from a "Who else their representatives file for" panel |
@@ -71,6 +72,7 @@ that lists the MCP address, its tools, what the data means and which pages to ci
 | `GET /api/employers/{id}/applications?page=` | Its visa applications, newest decision first, 100 per page, with job, worksite, wages, law firm and a link to each DOL file |
 | `GET /api/applications/{case_number}` | One application: headline numbers and every disclosure field, grouped into sections |
 | `GET /api/watchlist?program=&state=&sector=&since=&visa_only=&min_apps=` | Watchlist rows plus totals that count each case once |
+| `GET /api/osha?program=&state=&sector=&with_whd=&min_apps=` | Employers with linked OSHA inspections and their OSHA totals and WHD back wages, plus OSHA totals that count each inspection once. The employer endpoint also returns `osha`: its OSHA totals and each linked inspection with its citations and accidents |
 | `GET /api/states?program=&visa_only=` | Per state: visa employers, applications, employers with a case, cases, back wages, penalties, visa violations and rates |
 | `GET /api/sectors?program=&visa_only=` | The same numbers per NAICS sector |
 | `GET /api/overview` | Headline totals and the lookup page's starting points (computed once per server start) |
@@ -80,9 +82,10 @@ that lists the MCP address, its tools, what the data means and which pages to ci
 | `GET /api/watchlist.csv?…` | The Watchlist as CSV with the same filters, each employer with the WHD case IDs behind its row and a link to its page |
 | `GET /api/employers/{id}/applications.csv` | All of an employer's applications as CSV: DOL case number, job, wages, worksite, law firm, source file and a link to each application page |
 | `GET /api/employers/{id}/cases.csv` | An employer's linked WHD cases as CSV, with WHD's field names, load date, match rule and error rate, and source file |
+| `GET /api/employers/{id}/osha.csv` | An employer's linked OSHA inspections as CSV, one row per citation item, with OSHA's activity number and field names, the standard as a citation, load date, match rule and a link to OSHA's page |
 | `GET /api/debarments.csv` | Every DOL debarment entry as CSV, with the IDs of matching employers |
 | `GET /api/meta` | States, NAICS sector names and the source files behind the database |
-| `POST /mcp` | The chat's eight lookups as a read-only MCP server (see `chat/README.md` for connecting Claude Desktop) |
+| `POST /mcp` | The chat's ten lookups as a read-only MCP server (see `chat/README.md` for connecting Claude Desktop) |
 | `GET /api/ask` | Whether the Ask page can take questions (`enabled`, or the `reason` it can't) |
 | `POST /api/ask` | Body `{"question", "history"}`. Streams JSON lines: one `tool` line as each lookup starts, then one `answer` line (linked answer, raw text, citations, lookups) or an `error` line. Returns 429 when the visitor is over their limit and 503 when the daily budget is used up |
 

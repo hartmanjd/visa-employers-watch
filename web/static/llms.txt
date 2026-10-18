@@ -1,6 +1,6 @@
 # Visa Employer Watch
 
-> A free, public research site over U.S. Department of Labor records: every employer that filed an H-1B (LCA) or H-2B visa application in fiscal year 2025, and the Wage and Hour Division (WHD) enforcement cases linked to those employers. Every number traces back to a DOL record ID.
+> A free, public research site over U.S. Department of Labor records: every employer that filed an H-1B (LCA) or H-2B visa application in fiscal year 2025, the Wage and Hour Division (WHD) enforcement cases linked to those employers, and the OSHA safety and health inspections linked to them. Every number traces back to a DOL record ID.
 
 AI tools can query the data through a read-only MCP server. No account or key is needed.
 
@@ -11,10 +11,11 @@ AI tools can query the data through a read-only MCP server. No account or key is
 ## MCP tools
 
 - `search_employers`: find employers by company name, trade name (DBA) or 9-digit tax ID (FEIN)
-- `get_employer`: one employer's details, linked WHD cases, top jobs and offered against prevailing wages
+- `get_employer`: one employer's details, linked WHD cases, linked OSHA inspections with each citation and accident report, top jobs and offered against prevailing wages
 - `list_applications`: an employer's visa applications, newest first
 - `get_application`: one application by its DOL case number, such as I-200-25126-941960
 - `watchlist`: employers with linked WHD cases, ranked and filtered by program, state, industry and year
+- `osha_watchlist`: employers with linked OSHA inspections, ranked by penalties, citations or deaths, with their WHD cases beside them
 - `state_stats` and `industry_stats`: per-state and per-industry counts and rates
 - `representatives`: law firms, agent businesses and attorneys or agents across all the employers they file for, with how many clients have WHD cases or visa-program violations against the typical rate
 - `data_overview`: totals for the whole database
@@ -24,6 +25,7 @@ AI tools can query the data through a read-only MCP server. No account or key is
 - WHD cases cover every law WHD enforces (minimum wage, overtime, child labor, H-1B, H-2B and others), not only visa violations. `get_employer` lists, for each case, the laws violated with violations, back wages, workers owed and penalties under each; WHD publishes counts, not a description of what happened.
 - WHD records have no tax ID, so cases are linked to employers by cleaned name plus ZIP code or state. About 3 to 4 percent of links are wrong in a tax-ID test.
 - `get_employer` includes any matching entry on DOL's published debarment lists. Debarment is a DOL finding; the match to the employer is by name (and state when DOL gives one).
+- OSHA inspections (opened 2004 or later) are linked the same way as WHD cases, by cleaned name plus the ZIP code or state of the inspected site or the mailing address. Each citation names the OSHA standard broken, its type (Serious, Willful, Repeat, Other) and the penalty OSHA proposed and the current one; deleted citations are left out. Each inspection carries `osha_url`, OSHA's own page for it.
 - The willful violator field is the employer's own Yes/No answer on its applications, not a DOL finding.
 
 ## Pages to cite
@@ -31,6 +33,7 @@ AI tools can query the data through a read-only MCP server. No account or key is
 - Employer: https://visa-employer-watch.onrender.com/#/employer/<employer_id>
 - Application: https://visa-employer-watch.onrender.com/#/application/<case_number>
 - Watchlist: https://visa-employer-watch.onrender.com/#/watchlist
+- Safety (OSHA) list: https://visa-employer-watch.onrender.com/#/safety
 - Law firm or agent: https://visa-employer-watch.onrender.com/#/representative/<kind>/<key> (kind firm or person; key URL-encoded)
 - DOL debarments, matched to filers: https://visa-employer-watch.onrender.com/#/debarments
 
@@ -40,11 +43,12 @@ AI tools can query the data through a read-only MCP server. No account or key is
 
 ## CSV downloads
 
-Every row keeps its record IDs (employer ID, DOL case number, WHD case ID) and a link to the page that shows it.
+Every row keeps its record IDs (employer ID, DOL case number, WHD case ID, OSHA activity number) and a link to the page that shows it.
 
 - Watchlist: https://visa-employer-watch.onrender.com/api/watchlist.csv (same filters as /api/watchlist: program, state, sector, since, visa_only, min_apps)
 - One employer's applications: https://visa-employer-watch.onrender.com/api/employers/<employer_id>/applications.csv
 - One employer's linked WHD cases: https://visa-employer-watch.onrender.com/api/employers/<employer_id>/cases.csv
+- One employer's linked OSHA inspections, one row per citation: https://visa-employer-watch.onrender.com/api/employers/<employer_id>/osha.csv
 - DOL debarments: https://visa-employer-watch.onrender.com/api/debarments.csv
 
 ## Optional

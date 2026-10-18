@@ -475,6 +475,10 @@ a.cite:hover { text-decoration: none; outline: 1px solid var(--accent); }
   .nav { overflow-x: auto; scrollbar-width: none; }
   .nav a { padding: 6px 8px; font-size: 12.5px; }
 }
+@media (max-width: 440px) {
+  .topbar-inner { gap: 8px; }
+  .nav a { padding: 6px 6px; font-size: 12px; }
+}
 .composer [hidden] { display: none; }
 
 /* CSV download links */
@@ -491,3 +495,22 @@ h2.section .csv-link, .chip-row .csv-link { margin-left: auto; padding: 5px 12px
 .rf-fill { display: block; height: 100%; border-radius: 5px; }
 .rf-fill.this { background: var(--warn); }
 .rf-fill.all { background: var(--ink-3); }
+
+/* OSHA */
+.bar.bad i { background: var(--bad-soft); }
+.law.cite .law-name a { font-weight: 600; margin: 0 4px; }
+.law.cite .badge { margin-left: 2px; }
+.law.cite.deleted { opacity: .55; }
+.law.cite.deleted .law-stats { text-decoration: line-through; }
+.cite-title { font-weight: 500; color: var(--ink-2); margin-top: 2px; }
+.cite-hazard { font-weight: 400; font-style: italic; color: var(--ink-2); margin-top: 4px; }
+.cite-meta { font-weight: 400; font-size: 12px; color: var(--ink-3); margin-top: 2px; }
+.law-stats s { font-weight: 400; }
+.accident { border: 1px solid var(--line-2); border-radius: 10px; overflow: hidden; }
+.accident.fatal { border-color: var(--bad); }
+.accident.fatal .laws-head { background: var(--bad-soft); }
+.acc-body { padding: 10px 14px; display: grid; gap: 8px; font-size: 14px; }
+.acc-desc { font-weight: 600; }
+.acc-body blockquote { margin: 0; padding: 8px 12px; border-left: 3px solid var(--line); color: var(--ink-2); background: var(--surface-2); border-radius: 0 8px 8px 0; }
+.acc-body .law-notes { padding: 0; border: 0; }
+@media (max-width: 640px) { .law.cite { grid-template-columns: 1fr; } .law.cite .law-stats { justify-content: flex-start; } }

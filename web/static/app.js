@@ -61,9 +61,10 @@ async function route() {
   const ma = path.match(/^\/application\/([A-Za-z0-9-]+)$/);
   let mr;
   try {
-    if (ma) { setActiveNav((state.back.href.match(/^#\/(watchlist|map|industries|ask)/) || [, "search"])[1]); await applicationPage(ma[1]); }
-    else if (m) { setActiveNav((state.back.href.match(/^#\/(watchlist|map|industries|ask)/) || [, "search"])[1]); await employerPage(+m[1]); }
+    if (ma) { setActiveNav((state.back.href.match(/^#\/(watchlist|safety|map|industries|ask)/) || [, "search"])[1]); await applicationPage(ma[1]); }
+    else if (m) { setActiveNav((state.back.href.match(/^#\/(watchlist|safety|map|industries|ask)/) || [, "search"])[1]); await employerPage(+m[1]); }
     else if (path === "/watchlist") { setActiveNav("watchlist"); await watchlistPage(params); }
+    else if (path === "/safety") { setActiveNav("safety"); await safetyPage(params); }
     else if (path === "/map") { setActiveNav("map"); await mapPage(params); }
     else if (path === "/industries") { setActiveNav("industries"); await industriesPage(params); }
     else if (path === "/ask") { setActiveNav("ask"); await askPage(); }
@@ -83,7 +84,7 @@ document.addEventListener("click", (e) => {
     if (path.startsWith("/representative/")) {
       state.back = { href: location.hash, label: document.querySelector(".emp-head h1")?.textContent || "Law firm or agent" };
     } else if (!path.startsWith("/employer") && !path.startsWith("/application")) {
-      const labels = { "/watchlist": "Watchlist", "/map": "Map", "/industries": "Industries", "/ask": "Ask",
+      const labels = { "/watchlist": "Watchlist", "/safety": "Safety", "/map": "Map", "/industries": "Industries", "/ask": "Ask",
                        "/debarments": "Debarments", "/representatives": "Law firms and agents" };
       state.back = { href: location.hash || "#/", label: labels[path] || "Employer lookup" };
     }
@@ -233,6 +234,8 @@ async function employerPage(id) {
     willfulBadge(e),
     e.h1b_dependent ? '<span class="badge warn">H-1B dependent</span>' : "",
     s.cases ? `<span class="badge danger">${n(s.cases)} WHD case${s.cases === 1 ? "" : "s"}</span>` : '<span class="badge ok">No linked WHD cases</span>',
+    d.osha && d.osha.summary.inspections ? `<a class="badge warn" href="#emp-osha">${plural(d.osha.summary.inspections, "OSHA inspection", "OSHA inspections")}</a>` : "",
+    d.osha && d.osha.summary.deaths ? `<a class="badge bad" href="#emp-osha"><span class="dot"></span>${plural(d.osha.summary.deaths, "worker", "workers")} killed (OSHA accident reports)</a>` : "",
   ].join("");
   const related = d.same_tax_id.length ? `
     <div class="related"><span class="muted small" style="align-self:center">Same tax ID elsewhere</span>
@@ -277,6 +280,8 @@ async function employerPage(id) {
         A <b style="color:var(--ok)">green</b> edge means the ZIP code matched too; <b style="color:var(--warn)">amber</b> means only the state did.
         Check the WHD name and address before relying on a link.</div></div>
       ${d.cases.map(caseCard).join("")}` : `<div class="card empty">No WHD enforcement case is linked to this employer.</div>`}
+
+    ${oshaSection(d.osha, id)}
 
     <h2 class="section">Visa applications <span class="count" id="app-count"></span>
       ${s.applications ? csvLink(`/employers/${id}/applications.csv`, null, "Download every application as CSV, with DOL case numbers") : ""}</h2>
@@ -360,6 +365,218 @@ function caseCard(v) {
         file <span class="mono">${esc(v.source_file)}</span> (sha256 <span class="mono">${esc(v.source_sha256.slice(0, 12))}…</span>)</div>
     </div>
   </details>`;
+}
+
+// ---------- OSHA ----------
+const OSHA_TYPE_BADGE = { S: "warn", W: "danger", R: "danger", O: "", U: "" };
+
+function oshaSection(o, id) {
+  if (!o) return "";
+  const s = o.summary, list = o.inspections;
+  const head = `<h2 class="section" id="emp-osha">OSHA safety inspections <span class="count">${n(list.length)}</span>
+      ${list.length ? csvLink(`/employers/${id}/osha.csv`, null, "Download these inspections as CSV, one row per citation, with OSHA activity numbers") : ""}</h2>`;
+  if (!list.length) return head + `<div class="card empty">No OSHA inspection opened in 2004 or later is linked to this employer.</div>`;
+  return head + `
+    <div class="tiles osha-tiles">
+      <div class="card tile"><div class="label">Inspections</div><div class="value">${n(s.inspections)}</div><div class="sub">${n(s.inspections_with_violations)} with citations · since 2004</div></div>
+      <div class="card tile ${s.serious + s.willful + s.repeat_violations ? "alert" : ""}"><div class="label">Citation items</div><div class="value">${n(s.violations)}</div>
+        <div class="sub">${n(s.serious)} serious · ${n(s.willful)} willful · ${n(s.repeat_violations)} repeat</div></div>
+      <div class="card tile ${s.penalties ? "bad" : ""}"><div class="label">OSHA penalties</div><div class="value">${compactMoney(s.penalties)}</div>
+        <div class="sub">current amount; ${compactMoney(s.initial_penalty)} first proposed</div></div>
+      <div class="card tile ${s.deaths ? "bad" : ""}"><div class="label">Accident reports</div><div class="value">${n(s.accidents)}</div>
+        <div class="sub">${plural(s.deaths, "worker", "workers")} killed · ${n(s.hospitalized)} hospitalized</div></div>
+    </div>
+    <div class="callout" style="margin-top:16px">${icon.info}<div>OSHA records carry no tax ID either, so each inspection is linked by name and location,
+      using the inspected site or the mailing address. A <b style="color:var(--ok)">green</b> edge means the ZIP code matched; <b style="color:var(--warn)">amber</b> means only the state did.
+      Penalties are OSHA's current amounts, after any settlement or decision.</div></div>
+    ${list.map(oshaCard).join("")}`;
+}
+
+function citationRow(v) {
+  const std = v.standard_info;
+  const changed = v.initial_penalty !== v.current_penalty;
+  const stats = [
+    v.nr_exposed ? `<span><b>${n(v.nr_exposed)}</b> ${v.nr_exposed === 1 ? "worker" : "workers"} exposed</span>` : "",
+    v.gravity ? `<span>gravity <b>${Number(v.gravity)}</b>/10</span>` : "",
+    `<span class="${v.current_penalty ? "bad-text" : ""}"><b>${money(v.current_penalty)}</b>${changed ? ` <s class="muted">${money(v.initial_penalty)}</s>` : ""}</span>`,
+  ].join("");
+  return `
+    <div class="law cite ${v.deleted ? "deleted" : ""}">
+      <div class="law-name"><span class="mono small muted">${esc(v.citation_id)}</span>
+        ${std.url ? `<a href="${esc(std.url)}" target="_blank" rel="noopener">${esc(std.citation)}</a>` : esc(std.citation)}
+        <span class="badge ${OSHA_TYPE_BADGE[v.viol_type] || ""}">${esc(v.type_label || "–")}</span>
+        ${v.deleted ? '<span class="badge">Deleted</span>' : ""}
+        ${std.title ? `<div class="cite-title">${esc(std.title)}</div>` : ""}
+        ${v.hazard_text ? `<div class="cite-hazard">“${esc(v.hazard_text)}”</div>` : ""}
+        <div class="cite-meta">Issued ${day(v.issuance_date)}${v.abatement ? ` · ${esc(v.abatement)}` : v.abate_date ? ` · fix due ${day(v.abate_date)}` : ""}${v.contest_date ? ` · contested ${day(v.contest_date)}` : ""}${v.final_order_date ? ` · final order ${day(v.final_order_date)}` : ""}</div>
+      </div>
+      <div class="law-stats">${stats}</div>
+    </div>`;
+}
+
+function accidentBlock(a) {
+  const hurt = a.injuries.map((j) => [j.degree, [j.nature, j.body_part ? `(${j.body_part.toLowerCase()})` : ""].filter(Boolean).join(" "),
+    j.age ? `age ${j.age}` : "", j.occupation || ""].filter(Boolean).join(" · ")).filter(Boolean);
+  return `
+    <div class="accident ${a.fatality === "X" ? "fatal" : ""}">
+      <div class="laws-head"><span class="mini-h">${a.fatality === "X" ? "Fatal accident" : "Accident"} · ${day(a.event_date)}</span>
+        <span class="meta">OSHA accident report <span class="mono">${esc(a.summary_nr)}</span></span></div>
+      <div class="acc-body">
+        <div class="acc-desc">${esc(a.event_desc || "")}</div>
+        ${a.narrative ? `<blockquote>${esc(a.narrative)}</blockquote>` : ""}
+        ${hurt.length ? `<div class="law-notes">${hurt.map((h) => `<span class="badge ${/^Killed/.test(h) ? "bad" : "warn"}">${esc(h)}</span>`).join("")}</div>` : ""}
+      </div>
+    </div>`;
+}
+
+function oshaCard(i) {
+  const zip = i.method === "clean name + ZIP";
+  const live = i.violations.filter((v) => !v.deleted);
+  const kinds = ["W", "R", "S"].map((k) => [k, live.filter((v) => v.viol_type === k).length]).filter(([, c]) => c);
+  const kindLabel = { W: "willful", R: "repeat", S: "serious" };
+  return `
+  <details class="card case">
+    <summary>
+      <span class="strip ${zip ? "zip" : ""}" title="${esc(i.method)}"></span>
+      <div>
+        <div class="title">${esc(i.estab_name)}</div>
+        <div class="meta">Inspection <span class="mono">${esc(i.activity_nr)}</span> · opened ${day(i.open_date)} · ${esc(i.type_label)}
+          · ${esc(titleCase(i.site_city))}, ${esc(i.site_state)}
+          ${kinds.map(([k, c]) => `<span class="badge ${OSHA_TYPE_BADGE[k]}">${n(c)} ${kindLabel[k]}</span>`).join(" ")}
+          ${i.accidents.some((a) => a.fatality === "X") ? '<span class="badge bad">Fatality</span>' : ""}</div>
+      </div>
+      <div class="money ${i.penalties ? "bad-text" : "zero"}">${money(i.penalties)}<div class="meta">${plural(i.n_violations, "citation", "citations")}</div></div>
+      ${icon.chev}
+    </summary>
+    <div class="case-body">
+      <dl class="kv">
+        <dt>Inspected site</dt><dd>${esc(i.site_address)}, ${esc(i.site_city)}, ${esc(i.site_state)} ${esc(i.site_zip)}</dd>
+        ${i.mail_street ? `<dt>Mailing address</dt><dd>${esc(i.mail_street)}, ${esc(i.mail_city)}, ${esc(i.mail_state)} ${esc(i.mail_zip)}</dd>` : ""}
+        <dt>Why OSHA came</dt><dd>${esc(i.type_label)} · ${esc(i.focus || "")} inspection, ${esc((i.scope_label || "").toLowerCase())} scope</dd>
+        <dt>Dates</dt><dd>Opened ${day(i.open_date)}${i.close_case_date ? ` · closed ${day(i.close_case_date)}` : " · still open"}</dd>
+        ${i.nr_in_estab ? `<dt>Employees at site</dt><dd>${n(i.nr_in_estab)}</dd>` : ""}
+        <dt>Owner</dt><dd>${esc(i.owner_label || "–")}</dd>
+        ${i.n_violations ? `<dt>Penalties</dt><dd class="bad-text">${money(i.penalties)} now${i.initial_penalty !== i.penalties ? `, ${money(i.initial_penalty)} first proposed` : ""}</dd>` : ""}
+      </dl>
+      <div class="laws">
+        <div class="laws-head"><span class="mini-h">What OSHA cited</span>
+          <span class="meta">${plural(i.n_violations, "citation item", "citation items")}${i.violations.length > live.length ? ` · ${n(i.violations.length - live.length)} deleted` : ""}</span></div>
+        ${i.violations.length ? i.violations.map(citationRow).join("") : `<div class="law empty">OSHA issued no citations in this inspection.</div>`}
+      </div>
+      ${i.accidents.map(accidentBlock).join("")}
+      <div class="match"><span class="badge ${zip ? "ok" : "warn"}">${zip ? "Name + ZIP" : "Name + state"}</span>
+        <div>${esc(i.match_label)}. Compared the OSHA ${esc(i.osha_name_field)} and ${esc(i.osha_address_field)} address with the employer ${esc(i.employer_name_field)}.</div></div>
+      <div class="source">Source: <a href="${esc(i.osha_url)}" target="_blank" rel="noopener">OSHA's page for inspection ${esc(i.activity_nr)}</a> ·
+        DOL OSHA API <span class="mono">${esc(i.source_urls)}</span>, loaded by DOL ${esc(i.load_dt)} ·
+        file <span class="mono">${esc(i.source_file)}</span> (sha256 <span class="mono">${esc(i.source_sha256.slice(0, 12))}…</span>)</div>
+    </div>
+  </details>`;
+}
+
+const SAFETY_COLUMNS = [
+  { key: "employer_name", label: "Employer", type: "text" },
+  { key: "penalties", label: "OSHA penalties", type: "num" },
+  { key: "inspections", label: "Inspections", type: "num" },
+  { key: "violations", label: "Citations", type: "num" },
+  { key: "serious", label: "Serious", type: "num" },
+  { key: "willful_repeat", label: "Willful or repeat", type: "num" },
+  { key: "deaths", label: "Deaths", type: "num" },
+  { key: "whd_back_wages", label: "WHD back wages", type: "num" },
+  { key: "latest_inspection", label: "Latest inspection", type: "text" },
+];
+const sf = { key: null, rows: [], totals: null, sort: "penalties", dir: -1, page: 1 };
+
+async function safetyPage(params) {
+  if (!state.meta) state.meta = await api("/meta");
+  const f = { program: params.get("program") || "", state: params.get("state") || "", sector: params.get("sector") || "",
+              with_whd: params.get("with_whd") === "1" };
+  sf.sort = params.get("sort") || "penalties";
+  sf.dir = params.get("dir") === "asc" ? 1 : -1;
+  const key = JSON.stringify(f);
+  const seg = (val, label) => `<button data-program="${val}" class="${f.program === val ? "on" : ""}">${label}</button>`;
+  app.innerHTML = `
+    <div class="eyebrow">OSHA safety and health inspections</div>
+    <h1 class="page-title">Safety</h1>
+    <p class="lede">Visa employers with OSHA inspections linked to them since 2004, most penalties first, with their Wage and Hour
+      back wages beside them. Turn on the last filter to see employers with both safety and wage records.</p>
+    <div class="card filters">
+      <div class="field"><label>Program</label><div class="segmented" id="s-program">${seg("", "All")}${seg("H-1B", "H-1B")}${seg("H-2B", "H-2B")}</div></div>
+      <div class="field"><label for="s-state">State</label><select id="s-state"><option value="">All states</option>
+        ${state.meta.states.map((s) => `<option ${s === f.state ? "selected" : ""}>${esc(s)}</option>`).join("")}</select></div>
+      <div class="field"><label for="s-sector">Industry</label><select id="s-sector" style="max-width:220px"><option value="">All industries</option>
+        ${Object.entries(state.meta.sectors).map(([k, v]) => `<option value="${k}" ${k === f.sector ? "selected" : ""}>${esc(v)}</option>`).join("")}</select></div>
+      <label class="toggle"><input id="s-whd" type="checkbox" ${f.with_whd ? "checked" : ""}> Only employers with WHD cases too</label>
+    </div>
+    <div class="tiles" id="sf-tiles"></div>
+    <div class="card" style="margin-top:16px" id="sf-table"><div class="loading"><div class="spinner"></div>Loading…</div></div>
+    <p class="note">OSHA records have no tax ID, so every inspection is linked by name and the ZIP code or state of the inspected site or mailing address.
+      Penalties are OSHA's current amounts after settlements and decisions; deleted citations are left out. Deaths come from OSHA accident reports,
+      which are published after a case closes. A company with several employer rows (addresses or programs) appears once per row; the tiles count each inspection once.</p>`;
+  const go = (changes) => {
+    const p = new URLSearchParams({ ...Object.fromEntries(params), ...changes });
+    [...p.entries()].forEach(([k, v]) => { if (v === "" || (k === "with_whd" && v === "0")) p.delete(k); });
+    location.hash = "#/safety" + (p.toString() ? "?" + p : "");
+  };
+  document.getElementById("s-program").addEventListener("click", (e) => { if (e.target.dataset.program != null) go({ program: e.target.dataset.program }); });
+  document.getElementById("s-state").addEventListener("change", (e) => go({ state: e.target.value }));
+  document.getElementById("s-sector").addEventListener("change", (e) => go({ sector: e.target.value }));
+  document.getElementById("s-whd").addEventListener("change", (e) => go({ with_whd: e.target.checked ? "1" : "0" }));
+  if (sf.key !== key) {
+    const d = await api("/osha", { ...f, with_whd: f.with_whd ? "true" : "" });
+    sf.rows = d.rows.map((r) => ({ ...r, willful_repeat: r.willful + r.repeat_violations,
+                                   latest_inspection: (r.latest_inspection || "").slice(0, 10) }));
+    sf.totals = d.totals;
+    sf.key = key;
+  }
+  sf.page = Math.max(1, parseInt(params.get("page"), 10) || 1);
+  const t = sf.totals || {}, rows = sf.rows;
+  const sum = (k) => rows.reduce((a, r) => a + (r[k] || 0), 0);
+  document.getElementById("sf-tiles").innerHTML = `
+    <div class="card tile"><div class="label">Employers shown</div><div class="value">${n(rows.length)}</div><div class="sub">${n(rows.filter((r) => r.whd_cases).length)} with WHD cases too</div></div>
+    <div class="card tile"><div class="label">Inspections</div><div class="value">${n(t.inspections)}</div><div class="sub">linked to any visa employer</div></div>
+    <div class="card tile alert"><div class="label">Citation items</div><div class="value">${n(t.violations)}</div><div class="sub">deleted items left out</div></div>
+    <div class="card tile bad"><div class="label">OSHA penalties</div><div class="value">${compactMoney(t.penalties)}</div><div class="sub">${money(t.penalties)}</div></div>
+    <div class="card tile bad"><div class="label">Workers killed</div><div class="value">${n(t.deaths)}</div><div class="sub">in accidents tied to inspections</div></div>`;
+  const box = document.getElementById("sf-table");
+  if (!rows.length) { box.innerHTML = `<div class="empty">No employers match these filters.</div>`; return; }
+  const col = SAFETY_COLUMNS.find((c) => c.key === sf.sort) || SAFETY_COLUMNS[1];
+  const sorted = [...rows].sort((a, b) => {
+    const x = a[col.key], y = b[col.key];
+    return (col.type === "num" ? (x - y) : String(x).localeCompare(String(y))) * sf.dir || b.penalties - a.penalties;
+  });
+  const pages = Math.ceil(sorted.length / WL_PAGE), page = Math.min(sf.page, pages);
+  const shown = sorted.slice((page - 1) * WL_PAGE, page * WL_PAGE);
+  const maxP = Math.max(...rows.map((r) => r.penalties), 1);
+  const th = (c) => `<th data-sort="${c.key}" class="${c.type === "num" ? "num" : ""} ${c.key === col.key ? "sorted" : ""}">${c.label}<span class="arrow">${c.key === col.key ? (sf.dir < 0 ? "↓" : "↑") : "↕"}</span></th>`;
+  box.innerHTML = `
+    <div class="table-wrap" style="max-height:70vh"><table class="sortable clickable">
+      <thead><tr>${SAFETY_COLUMNS.map(th).join("")}</tr></thead>
+      <tbody>${shown.map((r) => `<tr data-id="${r.employer_id}">
+        <td><a class="emp" href="#/employer/${r.employer_id}" data-employer title="${esc(r.employer_name)}">${esc(r.employer_name)}</a>
+          <div class="emp-sub">${programBadge(r.program)} ${esc(titleCase(r.city))}, ${esc(r.state)}</div></td>
+        <td class="num"><span class="bar bad"><i style="width:${Math.max(2, 100 * r.penalties / maxP)}%"></i><span>${money(r.penalties)}</span></span></td>
+        <td class="num">${n(r.inspections)}</td>
+        <td class="num">${n(r.violations)}</td>
+        <td class="num">${n(r.serious)}</td>
+        <td class="num">${r.willful_repeat ? `<b class="bad-text">${n(r.willful_repeat)}</b>` : '<span class="muted">0</span>'}</td>
+        <td class="num">${r.deaths ? `<b class="bad-text">${n(r.deaths)}</b>` : '<span class="muted">0</span>'}</td>
+        <td class="num ${r.whd_back_wages ? "good-text" : "muted"}">${r.whd_cases ? money(r.whd_back_wages) : "–"}</td>
+        <td class="mono small">${esc(r.latest_inspection || "–")}</td>
+      </tr>`).join("")}</tbody></table></div>
+    <div class="pager"><span>${n((page - 1) * WL_PAGE + 1)}–${n(Math.min(page * WL_PAGE, sorted.length))} of ${n(sorted.length)} employers</span>
+      <span class="btns"><button class="btn" data-page="${page - 1}" ${page <= 1 ? "disabled" : ""}>Previous</button>
+      <button class="btn" data-page="${page + 1}" ${page >= pages ? "disabled" : ""}>Next</button></span></div>`;
+  box.querySelectorAll("th[data-sort]").forEach((h) => h.addEventListener("click", () => {
+    const k = h.dataset.sort, c = SAFETY_COLUMNS.find((x) => x.key === k);
+    const dir = k === sf.sort ? (sf.dir < 0 ? "asc" : "desc") : (c.type === "num" ? "desc" : "asc");
+    go({ sort: k, dir, page: "" });
+  }));
+  box.querySelectorAll("[data-page]").forEach((b) => b.addEventListener("click", () => go({ page: b.dataset.page })));
+  box.querySelectorAll("tbody tr").forEach((tr) => tr.addEventListener("click", (e) => {
+    if (e.target.closest("a")) return;
+    state.back = { href: location.hash, label: "Safety" };
+    location.hash = "#/employer/" + tr.dataset.id;
+  }));
 }
 
 async function loadApplications(id, page) {

@@ -17,12 +17,14 @@ The employer and application tables (`filers_*`), the database (`research.db`) a
 | scripts/name_match_benchmark.py | Produces name_match_benchmark.csv |
 | scripts/fetch_whd.py | Downloads every column of the WHD enforcement table (key from env var DOL_API_KEY, sent in the URL). 1,000 rows a page, backs off on rate limits, re-run with the same output file to resume |
 | scripts/match_whd.py | Match rates of WHD H-1B/H-2B violation cases to filers |
+| scripts/fetch_osha.py | Downloads OSHA inspection records through the same DOL API: first a lean index of every inspection (name, site and mailing ZIP and state, open date; one request a month), then, for the inspections that match a visa filer, every column of the inspection, its citation items, general duty clause text, accident reports with their written accounts and injured workers, and OSHA's injury code list |
+| scripts/match_osha.py | Lists the inspections in the index that match a visa filer, with build_db.py's rules, for the detail download |
 | scripts/build_db.py | Builds `research.db` (SQLite) from the tables above; see Database |
 | research.db (not in git) | The database |
 | debarments.csv | DOL's published debarment lists in one table (H-1B, H-2A, H-2B and permanent labor certification): entity, type, location, period, reason, CFR citation, source URL and file. Kept in git because it is small and is read by the website directly |
 | scripts/parse_debarments.py | Builds debarments.csv from the three DOL files; see Debarments |
 | whd_match_rates.csv | Output of match_whd.py (run 2026-10-15 on 370,964 WHD cases) |
-| tests/ | Tests for manifests, the employer build and the WHD download (no network needed) |
+| tests/ | Tests for manifests, the employer build, the WHD download and the OSHA tables (no network needed) |
 
 ## Provenance
 
@@ -46,6 +48,14 @@ A checksum is a fingerprint of the file: change one character and it changes. `p
 | applications | visa application | case_number, employer_id, case_status, visa_class, then every disclosure column (179 in all; H-2B-only columns are empty on H-1B rows and the other way round) |
 | violation_cases | WHD enforcement case | every column WHD publishes (110): case_id, names, address, industry, dates, totals, then violations, back wages, workers owed and penalties under each law (minimum wage and overtime, child labor and minors employed, FMLA, federal contracts, farmworker protections, H-1B, H-2A, H-2B and others), the FLSA repeat/willful flag, load_dt |
 | matches | WHD case linked to an employer | case_id, employer_id, method, est_false_match_rate, whd_name_field, employer_name_field |
+| osha_inspections | OSHA inspection linked to a visa filer (opened 2004 or later by default) | every column OSHA publishes: activity_nr, establishment name, site and mailing address, NAICS, inspection type, scope, owner, union status, employees, open and close dates, load_dt |
+| osha_violations | OSHA citation item | activity_nr, citation_id, standard, viol_type (Serious, Willful, Repeat, Other), gravity, workers exposed, instances, initial and current penalty, abatement, contest and final order dates, delete_flag (X for deleted items, which are kept but left out of totals), load_dt |
+| osha_gen_duty_text | line of a general duty clause citation | activity_nr, citation_id, line_nr, line_text (the hazard in OSHA's words) |
+| osha_accidents, osha_accident_text | accident tied to a linked inspection, and each line of its written account | summary_nr, event_date, event_desc, keywords, fatality; summary_nr, line_nr, abstract_text |
+| osha_injuries | injured worker in such an accident | summary_nr, rel_insp_nr (the inspection), age, sex, degree_of_inj (1 killed, 2 hospitalized), nature, body part, occupation codes |
+| osha_codes | OSHA injury code | accident_code (code table), accident_number, accident_value |
+| osha_matches | OSHA inspection linked to an employer | activity_nr, employer_id, method, est_false_match_rate, osha_name_field, osha_address_field, employer_name_field |
+| osha_employer_totals | employer with linked inspections | inspections, citation items, Serious, Willful and Repeat items, initial and current penalties, accidents, deaths, first and latest inspection (stored so the website does not add them up) |
 | flag_baselines | red flag per program | flag, program, share (the share of all the program's applications that meet the flag's condition; the employer page compares each employer with it) |
 | rep_filings | employer, law firm and attorney or agent combination | employer_id, firm, firm_fein, first_name, last_name, state, applications (the law firms and agents pages are built from it) |
 
@@ -55,6 +65,8 @@ numbers; everything else (ZIPs, phone numbers, codes) is text. `n_certified` cou
 Withdrawn" and H-2B "Determination Issued - Certification" or "Partial Certification".
 
 WHD cases have no tax ID, so `matches` links them by cleaned name + ZIP, or failing that cleaned name + state, using the WHD trade or legal name against the employer's name or DBA. `est_false_match_rate` is that rule's false-match rate on the tax-ID benchmark (`name_match_benchmark.csv`).
+
+OSHA inspections are linked the same way: cleaned name + ZIP, else cleaned name + state, trying the inspected site and the mailing address (a jobsite can be far from the company's office), and both the establishment name and any name after "DBA" in it. The error rates are the WHD rules' rates, since the benchmark has no OSHA answer key.
 
 `flag_baselines` and `rep_filings` are summaries of the applications table that take the website several seconds of CPU to compute, so the build stores them (`add_summaries` in `dashboard/queries.py`). The website still works on a database without them, computing the same values on first use.
 
@@ -92,10 +104,16 @@ To re-run the WHD match (raw download about 180 MB and 45 to 80 minutes, dependi
     python3 scripts/fetch_whd.py /tmp/whd.csv
     python3 scripts/match_whd.py /tmp/whd.csv filers_lca_fy2025.csv filers_h2b_fy2025.csv .
 
-To build the database:
+To download the OSHA inspections linked to visa filers (key in env var DOL_API_KEY; each step backs off on rate limits, and the index step resumes where it stopped):
+
+    python3 scripts/fetch_osha.py index /tmp/osha_index.csv 2004-01-01
+    python3 scripts/match_osha.py /tmp/osha_index.csv filers_lca_fy2025.csv filers_h2b_fy2025.csv /tmp/osha_ids.txt
+    python3 scripts/fetch_osha.py details /tmp/osha_ids.txt /tmp/osha
+
+To build the database (leave out `--osha` for a database without OSHA data):
 
     python3 scripts/build_db.py research.db --lca filers_lca_fy2025.csv --h2b filers_h2b_fy2025.csv \
-        --whd /tmp/whd.csv --benchmark name_match_benchmark.csv
+        --whd /tmp/whd.csv --benchmark name_match_benchmark.csv --osha /tmp/osha
 
 To run the tests (from the repo root):
 

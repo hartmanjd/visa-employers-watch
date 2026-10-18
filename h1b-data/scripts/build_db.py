@@ -12,21 +12,36 @@ Tables:
   flag_baselines,  summaries the website would otherwise compute at startup
   rep_filings      (see add_summaries in dashboard/queries.py)
 
+With --osha DIR (the files fetch_osha.py writes), also the OSHA inspections linked to a
+visa filer, with every column DOL publishes:
+  osha_inspections      one row per inspection
+  osha_violations       one row per citation item (deleted items kept, delete_flag X)
+  osha_gen_duty_text    the written hazard of general duty clause citations, line by line
+  osha_injuries         one row per injured worker in an accident tied to the inspection
+  osha_accidents        one row per accident; osha_accident_text holds its written account
+  osha_codes            OSHA's code list for the injury columns
+  osha_matches          links an inspection to an employer, like matches does for WHD
+  osha_employer_totals  per-employer counts and penalties, so the website does not add them up
+
 Every input must have a manifest that still matches it (see provenance.py), and
 every row in the data tables carries the source_id of the file it came from.
 WHD cases have no tax ID, so they are linked by cleaned name + ZIP or cleaned
 name + state (trade name or legal name against employer name or DBA); a pair
-keeps the stronger rule. Writes OUT.db.manifest.json.
+keeps the stronger rule. OSHA inspections are linked the same way, trying the
+site and the mailing address, and the establishment name and any name after
+"DBA" in it. Writes OUT.db.manifest.json.
 
 Usage: python3 build_db.py OUT.db --lca filers_lca.csv --h2b filers_h2b.csv
                            --whd whd.csv --benchmark name_match_benchmark.csv
+                           [--osha OSHA_DIR [--osha-since 2004-01-01]]
 """
-import argparse, json, os, sqlite3, sys
+import argparse, json, os, re, sqlite3, sys
 import pandas as pd
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from build_filers import applications_path
 from fetch_whd import FIELDS as WHD_FIELDS
-from employer_keys import clean_name, zip5
+from fetch_osha import DETAILS as OSHA_DETAILS, LOOKUP_FIELDS as OSHA_LOOKUP_FIELDS
+from employer_keys import clean_name, raw_name, zip5
 from provenance import verify_manifest, write_manifest
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "dashboard"))
 from queries import add_summaries  # noqa: E402
@@ -184,7 +199,129 @@ def match(whd, emp, false_rates):
               "whd_name_field", "employer_name_field"]]
 
 
-def build(out, lca, h2b, whd_path, bench):
+# ---------- OSHA ----------
+# CSV from fetch_osha.py -> (table, integer columns, dollar columns). Everything else is text.
+OSHA_FILES = {
+    "inspection": ("osha_inspections", ["activity_nr", "nr_in_estab"], []),
+    "violation": ("osha_violations", ["activity_nr", "nr_instances", "nr_exposed"],
+                  ["current_penalty", "initial_penalty", "fta_penalty"]),
+    "violation_gen_duty_std": ("osha_gen_duty_text", ["activity_nr", "line_nr"], []),
+    "accident_injury": ("osha_injuries", [
+        "summary_nr", "rel_insp_nr", "age", "nature_of_inj", "part_of_body", "src_of_injury", "event_type",
+        "evn_factor", "hum_factor", "occ_code", "degree_of_inj", "task_assigned", "const_op",
+        "const_op_cause", "fat_cause", "fall_distance", "fall_ht", "injury_line_nr"], []),
+    "accident": ("osha_accidents", ["summary_nr", "build_stories", "nonbuild_ht"], []),
+    "accident_abstract": ("osha_accident_text", ["summary_nr", "line_nr"], []),
+    "accident_lookup2": ("osha_codes", ["accident_number"], []),
+}
+OSHA_SCHEMA = """
+CREATE TABLE osha_matches (
+  activity_nr INTEGER REFERENCES osha_inspections, employer_id INTEGER REFERENCES employers,
+  method TEXT, est_false_match_rate REAL, osha_name_field TEXT, osha_address_field TEXT,
+  employer_name_field TEXT, PRIMARY KEY (activity_nr, employer_id));
+CREATE INDEX osha_matches_employer ON osha_matches(employer_id);
+CREATE INDEX osha_violations_activity ON osha_violations(activity_nr);
+CREATE INDEX osha_gen_duty_activity ON osha_gen_duty_text(activity_nr);
+CREATE INDEX osha_injuries_activity ON osha_injuries(rel_insp_nr);
+CREATE INDEX osha_accident_text_summary ON osha_accident_text(summary_nr);
+"""
+# Per employer, over its linked inspections: deleted citation items are left out, and a citation's
+# penalty is DOL's current amount (after settlement or decision); the proposed amount is kept beside it.
+OSHA_TOTALS_SQL = """
+CREATE TABLE osha_employer_totals AS
+WITH v AS (SELECT activity_nr, COUNT(*) AS violations, SUM(viol_type = 'S') AS serious,
+                  SUM(viol_type = 'W') AS willful, SUM(viol_type = 'R') AS repeat_,
+                  COALESCE(SUM(initial_penalty), 0) AS initial_penalty,
+                  COALESCE(SUM(current_penalty), 0) AS current_penalty
+           FROM osha_violations WHERE COALESCE(delete_flag, '') != 'X' GROUP BY activity_nr),
+     a AS (SELECT rel_insp_nr AS activity_nr, COUNT(DISTINCT summary_nr) AS accidents,
+                  SUM(degree_of_inj = 1) AS deaths, SUM(degree_of_inj = 2) AS hospitalized
+           FROM osha_injuries GROUP BY rel_insp_nr)
+SELECT m.employer_id, COUNT(*) AS inspections,
+       SUM(m.method = 'clean name + ZIP') AS zip_links,
+       SUM(COALESCE(v.violations, 0) > 0) AS inspections_with_violations,
+       COALESCE(SUM(v.violations), 0) AS violations, COALESCE(SUM(v.serious), 0) AS serious,
+       COALESCE(SUM(v.willful), 0) AS willful, COALESCE(SUM(v.repeat_), 0) AS repeat_violations,
+       COALESCE(SUM(v.initial_penalty), 0) AS initial_penalty,
+       COALESCE(SUM(v.current_penalty), 0) AS penalties,
+       COALESCE(SUM(a.accidents), 0) AS accidents, COALESCE(SUM(a.deaths), 0) AS deaths,
+       COALESCE(SUM(a.hospitalized), 0) AS hospitalized,
+       MIN(i.open_date) AS first_inspection, MAX(i.open_date) AS latest_inspection
+FROM osha_matches m JOIN osha_inspections i USING (activity_nr)
+LEFT JOIN v USING (activity_nr) LEFT JOIN a USING (activity_nr)
+GROUP BY m.employer_id;
+CREATE UNIQUE INDEX osha_totals_employer ON osha_employer_totals(employer_id);
+"""
+
+
+def _after_dba(s):
+    """The name after "DBA" in an OSHA establishment name ("ACME INC DBA ACME FARMS" -> "ACME FARMS")."""
+    m = re.search(r"\bD/?B/?A\b(.*)$", raw_name(s))
+    return clean_name(m.group(1)) if m else ""
+
+
+def osha_keys(insp):
+    parts = []
+    for name_field, names in [("establishment name", insp.estab_name.map(clean_name)),
+                              ("name after DBA", insp.estab_name.map(_after_dba))]:
+        for addr, prefix in [("site", "site_"), ("mailing", "mail_")]:
+            parts.append(pd.DataFrame({
+                "activity_nr": insp.activity_nr, "osha_name_field": name_field, "osha_address_field": addr,
+                "name_clean": names, "state": insp[prefix + "state"].str.upper().str.strip(),
+                "zip5": insp[prefix + "zip"].map(zip5)}))
+    k = pd.concat(parts)
+    return k[k.name_clean != ""]
+
+
+def match_osha(insp, emp, false_rates):
+    """Links of OSHA inspections to employers, by the WHD rules: an (inspection, employer) pair keeps the
+    strongest rule, and within a rule the site address before the mailing address."""
+    ok, ek = osha_keys(insp), employer_keys(emp)
+    found = []
+    for rule, cols in MATCH_RULES.items():
+        m = ok.merge(ek, on=cols)
+        m = m[(m.name_clean != "") & (m[cols[1]] != "")]
+        found.append(m.assign(method=rule, est_false_match_rate=false_rates.get(rule)))
+    m = pd.concat(found)  # strongest rule first, site before mailing, so keep="first" keeps them
+    m = m.drop_duplicates(["activity_nr", "employer_id"], keep="first")
+    return m[["activity_nr", "employer_id", "method", "est_false_match_rate", "osha_name_field",
+              "osha_address_field", "employer_name_field"]]
+
+
+def load_osha(con, osha_dir, emp, false_rates, since):
+    """Load the OSHA inspections opened on or after `since` that match a visa filer, with their details."""
+    path = lambda t: os.path.join(osha_dir, f"osha_{t}.csv")
+    insp = read(path("inspection"))
+    insp = insp[insp.open_date.str[:10] >= since]
+    m = match_osha(insp, emp, false_rates)
+    m["activity_nr"] = m.activity_nr.astype(int)
+    keep = set(m.activity_nr)
+    con.executescript("".join(
+        f"CREATE TABLE {table} (" + ", ".join(
+            f"{c} {'INTEGER' if c in ints else 'REAL' if c in reals else 'TEXT'}"
+            + (" PRIMARY KEY" if (t, c) in {("inspection", "activity_nr"), ("accident", "summary_nr")} else "")
+            for c in (OSHA_DETAILS[t][1] if t in OSHA_DETAILS else OSHA_LOOKUP_FIELDS))
+        + ", source_id INTEGER REFERENCES sources);\n"
+        for t, (table, ints, reals) in OSHA_FILES.items()) + OSHA_SCHEMA)
+    summaries = set()
+    for t, (table, ints, reals) in OSHA_FILES.items():
+        df = insp if t == "inspection" else read(path(t))
+        if "activity_nr" in df:
+            df = df[pd.to_numeric(df.activity_nr).isin(keep)]
+        elif t == "accident_injury":
+            df = df[pd.to_numeric(df.rel_insp_nr).isin(keep)]
+            summaries = set(pd.to_numeric(df.summary_nr))
+        elif t != "accident_lookup2":
+            df = df[pd.to_numeric(df.summary_nr).isin(summaries)]
+        df = numeric(df.copy(), ints, reals)
+        df["source_id"] = add_source(con, path(t))
+        df.to_sql(table, con, if_exists="append", index=False)
+    m.to_sql("osha_matches", con, if_exists="append", index=False)
+    con.executescript(OSHA_TOTALS_SQL)
+    return [path(t) for t in OSHA_FILES]
+
+
+def build(out, lca, h2b, whd_path, bench, osha_dir=None, osha_since="2004-01-01"):
     if os.path.exists(out):
         os.remove(out)
     con = sqlite3.connect(out)
@@ -204,13 +341,18 @@ def build(out, lca, h2b, whd_path, bench):
     false_rates = dict(zip(read(bench).rule, pd.to_numeric(read(bench).false_match_rate)))
     m = match(whd, emp, false_rates)
     m.to_sql("matches", con, if_exists="append", index=False)
+    osha_inputs = load_osha(con, osha_dir, emp, false_rates, osha_since) if osha_dir else []
     con.commit()
     add_summaries(con)  # the website's slow whole-table aggregates, so it does not compute them at startup
     counts = {t: con.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
-              for t in ["sources", "employers", "applications", "violation_cases", "matches"]}
+              for t in ["sources", "employers", "applications", "violation_cases", "matches"]
+              + (["osha_inspections", "osha_violations", "osha_accidents", "osha_matches"] if osha_dir else [])}
     con.close()
-    inputs = [lca, applications_path(lca), h2b, applications_path(h2b), whd_path, bench]
-    write_manifest(out, __file__, inputs=inputs, params={"match_rules": MATCH_RULES, "tables": counts})
+    inputs = [lca, applications_path(lca), h2b, applications_path(h2b), whd_path, bench] + osha_inputs
+    params = {"match_rules": MATCH_RULES, "tables": counts}
+    if osha_dir:
+        params["osha_opened_since"] = osha_since
+    write_manifest(out, __file__, inputs=inputs, params=params)
     return counts
 
 
@@ -221,8 +363,10 @@ def main(argv=None):
     ap.add_argument("--h2b", required=True)
     ap.add_argument("--whd", required=True)
     ap.add_argument("--benchmark", required=True)
+    ap.add_argument("--osha", help="folder of osha_*.csv files from fetch_osha.py details")
+    ap.add_argument("--osha-since", default="2004-01-01", help="keep OSHA inspections opened on or after this date")
     a = ap.parse_args(argv)
-    counts = build(a.out, a.lca, a.h2b, a.whd, a.benchmark)
+    counts = build(a.out, a.lca, a.h2b, a.whd, a.benchmark, a.osha, a.osha_since)
     print(f"{a.out}: " + ", ".join(f"{t}={n}" for t, n in counts.items()))
 
 

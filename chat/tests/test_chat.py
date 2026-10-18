@@ -78,6 +78,20 @@ class ChatTests(unittest.TestCase):
         with self.assertRaises(LookupError):
             tools.run_tool(self.con, "representatives", {"key": "NOBODY"})
 
+    def test_osha_tools(self):
+        o = tools.run_tool(self.con, "get_employer", {"employer_id": self.acme})["osha"]
+        self.assertEqual((o["totals"]["inspections"], o["totals"]["penalties"]), (2, 43275.0))
+        first = o["inspections"][0]
+        self.assertEqual([c["citation_id"] for c in first["citations"]], ["01001", "02001"])  # deleted item left out
+        self.assertEqual(first["citations"][0]["standard"], "29 CFR 1910.212(a)(1)")
+        self.assertEqual(o["inspections"][1]["accidents"][0]["injured"], [{"degree": "Killed", "nature": "Amputation",
+                                                                           "body_part": "Abdomen", "age": 34}])
+        w = tools.run_tool(self.con, "osha_watchlist", {"program": "H-1B"})
+        self.assertEqual([(r["employer_id"], r["deaths"], r["whd_cases"]) for r in w["rows"]], [(self.acme, 1, 2)])
+        with self.assertRaises(ValueError):
+            tools.run_tool(self.con, "osha_watchlist", {"sort_by": "name"})
+        self.assertEqual(tools.run_tool(self.con, "data_overview", {})["osha"]["inspections"], 2)
+
     def test_every_tool_has_a_runner_and_a_closed_schema(self):
         for t in tools.TOOLS:
             self.assertIn(t["name"], tools.RUNNERS)

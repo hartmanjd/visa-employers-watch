@@ -178,6 +178,26 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(self.client.get("/api/employers/999999/cases.csv").status_code, 404)
         self.assertEqual(self.client.get("/api/employers/999999/applications.csv").status_code, 404)
 
+    def test_employer_osha_section_and_csv(self):
+        acme = self.acme_tx()["employer_id"]
+        o = self.client.get(f"/api/employers/{acme}").json()["osha"]
+        self.assertEqual((o["summary"]["inspections"], o["summary"]["penalties"]), (2, 43275.0))
+        self.assertEqual([i["activity_nr"] for i in o["inspections"]], [900001, 900002])
+        self.assertTrue(o["inspections"][0]["match_label"].startswith("Matched by clean name + ZIP"))
+        _, rows = self.csv_rows(f"/api/employers/{acme}/osha.csv")
+        self.assertEqual([(r["activity_nr"], r["citation_id"], r["deleted"]) for r in rows],
+                         [("900001", "01001", "False"), ("900001", "01002", "True"), ("900001", "02001", "False"),
+                          ("900002", "01001", "False")])
+        self.assertTrue(all(r["osha_url"].endswith("id=" + r["activity_nr"]) and r["load_dt"] for r in rows))
+        self.assertEqual(self.client.get("/api/employers/999999/osha.csv").status_code, 404)
+
+    def test_osha_list_and_filters(self):
+        d = self.client.get("/api/osha").json()
+        self.assertEqual([r["program"] for r in d["rows"]], ["H-1B", "H-2B"])
+        self.assertEqual(d["totals"]["inspections"], 2)
+        self.assertEqual(len(self.client.get("/api/osha", params={"program": "H-2B", "with_whd": "true"}).json()["rows"]), 1)
+        self.assertEqual(self.client.get("/api/osha", params={"sector": "99"}).status_code, 422)
+
     def test_debarments_csv(self):
         _, rows = self.csv_rows("/api/debarments.csv")
         self.assertEqual(len(rows), len(self.client.get("/api/debarments").json()))
