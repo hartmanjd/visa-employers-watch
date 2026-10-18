@@ -10,7 +10,7 @@ sys.path.insert(0, os.path.join(HERE, ".."))
 sys.path.insert(0, os.path.join(HERE, "..", "..", "h1b-data", "scripts"))
 sys.path.insert(0, os.path.join(HERE, "..", "..", "h1b-data", "tests"))
 import build_db, build_filers, fetch_whd, provenance, queries  # noqa: E402
-from test_build_db import filing, whd_case, write_csv  # noqa: E402
+from test_build_db import filing, whd_case, write_csv, write_osha  # noqa: E402
 
 LCA_URL = "https://example.gov/lca.xlsx"
 
@@ -48,7 +48,7 @@ def make_db(d):
     provenance.write_manifest(p("bench.csv"), provenance.__file__)
     with mock.patch("sys.stdout", io.StringIO()):
         build_db.main([p("research.db"), "--lca", p("filers_lca.csv"), "--h2b", p("filers_h2b.csv"),
-                       "--whd", p("whd.csv"), "--benchmark", p("bench.csv")])
+                       "--whd", p("whd.csv"), "--benchmark", p("bench.csv"), "--osha", write_osha(p("osha"))])
     return p("research.db")
 
 
@@ -315,6 +315,65 @@ class DownloadTests(unittest.TestCase):
         open(self.target, "w").close()
         queries.download_db(self.target, "file:///does/not/exist.gz", "0" * 64)
         self.assertEqual(os.path.getsize(self.target), 0)
+
+
+class OshaQueryTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.d = tempfile.mkdtemp()
+        cls.con = queries.connect(make_db(cls.d))
+        cls.acme = next(h for h in queries.search_employers(cls.con, "acme software")
+                        if h["state"] == "TX" and h["program"] == "H-1B")["employer_id"]
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.con.close()
+
+    def test_standard_codes_read_as_citations(self):
+        s = queries.osha_standard("19260652 C03 III")
+        self.assertEqual((s["citation"], s["title"], s["url"]),
+                         ("29 CFR 1926.652(c)(3)(iii)", "Construction: Excavations: protective systems (cave-ins)",
+                          "https://www.ecfr.gov/current/title-29/section-1926.652"))
+        self.assertEqual(queries.osha_standard("19101200 E01")["citation"], "29 CFR 1910.1200(e)(1)")
+        self.assertEqual(queries.osha_standard("19150099 A")["title"], "Shipyards")  # no section title
+        self.assertEqual(queries.osha_standard("5A0001")["citation"], "OSH Act Section 5(a)(1)")
+
+    def test_summary_counts_live_citations_only(self):
+        s = queries.osha_summary(self.con, self.acme)
+        self.assertEqual((s["inspections"], s["violations"], s["serious"], s["repeat_violations"], s["penalties"],
+                          s["initial_penalty"], s["deaths"]), (2, 3, 2, 1, 43275.0, 61550.0, 1))
+        other = next(h for h in queries.search_employers(self.con, "acme analytics"))["employer_id"]
+        self.assertEqual(queries.osha_summary(self.con, other)["inspections"], 0)
+
+    def test_inspections_carry_citations_accidents_and_sources(self):
+        insp = queries.osha_inspections(self.con, self.acme)
+        self.assertEqual([(i["activity_nr"], i["type_label"], i["n_violations"], i["penalties"]) for i in insp],
+                         [(900001, "Complaint", 2, 28275.0), (900002, "Fatality or catastrophe", 1, 15000.0)])
+        first = insp[0]
+        self.assertEqual(first["osha_url"], "https://www.osha.gov/ords/imis/establishment.inspection_detail?id=900001")
+        self.assertEqual([(v["citation_id"], v["type_label"], v["deleted"]) for v in first["violations"]],
+                         [("01001", "Serious", False), ("01002", "Other than serious", True), ("02001", "Repeat", False)])
+        self.assertEqual(first["violations"][0]["standard_info"]["title"], "General industry: Machine guarding")
+        self.assertEqual(first["violations"][0]["abatement"], "Fixed")
+        self.assertIn("apiprod.dol.gov", first["source_urls"])
+        fatal = insp[1]
+        self.assertEqual((fatal["osha_name_field"], fatal["osha_address_field"]), ("name after DBA", "mailing"))
+        self.assertEqual(fatal["violations"][0]["hazard_text"], "Employees were exposed to being struck by a forklift.")
+        a = fatal["accidents"][0]
+        self.assertEqual(a["narrative"], "A forklift backed up and struck him.")
+        self.assertEqual([(j["degree"], j["nature"], j["body_part"], j["age"]) for j in a["injuries"]],
+                         [("Killed", "Amputation", "Abdomen", 34)])
+
+    def test_watchlist_ranks_by_penalties_and_shows_whd_beside(self):
+        rows = queries.osha_watchlist(self.con, program="H-1B")
+        self.assertEqual([(r["employer_id"], r["inspections"], r["penalties"], r["whd_cases"]) for r in rows],
+                         [(self.acme, 2, 43275.0, 2)])
+        # Acme's H-2B row has the same name and ZIP, so the inspections link to it too.
+        self.assertEqual([r["program"] for r in queries.osha_watchlist(self.con)], ["H-1B", "H-2B"])
+        self.assertEqual(queries.osha_watchlist(self.con, state="CA"), [])
+        o = queries.osha_overview(self.con)
+        self.assertEqual((o["employers"], o["employers_with_whd"], o["inspections"], o["violations"], o["deaths"]),
+                         (2, 2, 2, 3, 1))
 
 
 if __name__ == "__main__":

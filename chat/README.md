@@ -69,7 +69,7 @@ copy is easiest to test with a command-line client, such as the MCP Inspector
 
 | File | What it is |
 | --- | --- |
-| tools.py | The nine lookups the model can call, their descriptions and input schemas |
+| tools.py | The ten lookups the model can call, their descriptions and input schemas |
 | engine.py | The instructions, the question-and-lookup loop, citation links and checks, and cost |
 | limits.py | The Ask page's daily spend cap and per-visitor rate limits |
 | __main__.py | `python3 -m chat`: ask one question from the terminal |

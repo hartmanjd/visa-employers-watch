@@ -31,8 +31,8 @@ DEBARMENTS_CSV = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", 
 
 # A gzipped copy of research.db published as a GitHub release asset, for hosts (like Render)
 # that only have the git checkout. The checksum is of the .gz file at that URL.
-DB_URL = "https://github.com/hartmanjd/visa-employers-watch/releases/download/data-2026-10-17b/research.db.gz"
-DB_SHA256 = "7f30c6f766a8c2c658881d471e3965391c977bd0e932c46bdd2ef678b3a3c0d3"
+DB_URL = "https://github.com/hartmanjd/visa-employers-watch/releases/download/data-2026-10-18/research.db.gz"
+DB_SHA256 = "89939f5a353fb16e8a40365dd8fd9ad6f8bdee57f08efefef44cde4ea34259b9"
 
 
 def connect(path=None):
@@ -47,17 +47,18 @@ def connect(path=None):
 
 
 def _older_layout(path):
-    """True for a database that predates the full disclosure columns or the full WHD columns."""
+    """True for a database that predates the full disclosure columns, the full WHD columns or the OSHA tables."""
     try:
         con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
         try:
             cols = {r[1] for r in con.execute("PRAGMA table_info(applications)")}
             whd = {r[1] for r in con.execute("PRAGMA table_info(violation_cases)")}
+            osha = con.execute("SELECT 1 FROM sqlite_master WHERE name = 'osha_employer_totals'").fetchone()
         finally:
             con.close()
     except sqlite3.DatabaseError:
         return False
-    return bool(cols) and ("job_title" not in cols or "flsa_cl_violtn_cnt" not in whd)
+    return bool(cols) and ("job_title" not in cols or "flsa_cl_violtn_cnt" not in whd or not osha)
 
 
 def download_db(path=None, url=None, sha256=None):
@@ -1101,6 +1102,239 @@ def employer_representatives(con, employer_id):
             if employer_id in g["employers"]:
                 out.append(_rep_summary(kind, key, g, idx, debarred))
     return sorted(out, key=lambda r: (r["kind"] != "firm", -r["clients"]))
+
+
+# ---------- OSHA ----------
+# OSHA inspections linked to visa employers by name and location, the same way as WHD cases (see
+# build_db.py). Code meanings are DOL's own, from the API's field descriptions for the OSHA datasets.
+OSHA_INSPECTION_TYPES = {"A": "Accident", "B": "Complaint", "C": "Referral", "D": "Monitoring", "E": "Variance",
+                         "F": "Follow-up", "G": "Unprogrammed related", "H": "Planned", "I": "Programmed related",
+                         "J": "Unprogrammed other", "K": "Programmed other", "L": "Other", "M": "Fatality or catastrophe"}
+OSHA_SCOPES = {"A": "Complete", "B": "Partial", "C": "Records only", "D": "No inspection"}
+OSHA_OWNERS = {"A": "Private", "B": "Local government", "C": "State government", "D": "Federal"}
+OSHA_VIOLATION_TYPES = {"S": "Serious", "W": "Willful", "R": "Repeat", "O": "Other than serious", "U": "Unclassified"}
+OSHA_ABATEMENT = {"Q": "Quick fix", "1": "Quick fix", "X": "Fixed", "2": "Fixed", "I": "Corrected during inspection",
+                  "3": "Corrected during inspection", "E": "Not fixed: employer out of business",
+                  "4": "Not fixed: employer out of business", "W": "Not fixed: worksite changed",
+                  "5": "Not fixed: worksite changed", "S": "Not fixed: Solicitor advised",
+                  "6": "Not fixed: Solicitor advised", "A": "Not fixed: Area Director's discretion",
+                  "7": "Not fixed: Area Director's discretion"}
+OSHA_DEGREE = {1: "Killed", 2: "Hospitalized", 3: "Injured, not hospitalized"}
+# Parts of 29 CFR that OSHA standards live in, and the titles of the most often cited sections
+# (eCFR section headings). Other sections show their part's name and number.
+CFR_PARTS = {"1903": "Inspections and citations", "1904": "Injury and illness records", "1910": "General industry",
+             "1915": "Shipyards", "1917": "Marine terminals", "1918": "Longshoring", "1926": "Construction",
+             "1928": "Agriculture"}
+CFR_SECTIONS = {
+    "1904.4": "Recording criteria", "1904.7": "General recording criteria", "1904.29": "Injury and illness forms",
+    "1904.32": "Annual summary", "1904.39": "Reporting deaths, hospitalizations, amputations and eye losses",
+    "1904.40": "Providing records to government representatives", "1904.41": "Electronic submission of injury records",
+    "1910.22": "Walking-working surfaces", "1910.23": "Ladders", "1910.25": "Stairways",
+    "1910.28": "Duty to have fall protection", "1910.29": "Fall protection systems", "1910.30": "Fall protection training",
+    "1910.36": "Exit routes: design", "1910.37": "Exit routes: maintenance and safeguards", "1910.38": "Emergency action plans",
+    "1910.39": "Fire prevention plans", "1910.95": "Occupational noise exposure", "1910.106": "Flammable liquids",
+    "1910.110": "Liquefied petroleum gases", "1910.119": "Process safety management of highly hazardous chemicals",
+    "1910.132": "Personal protective equipment", "1910.133": "Eye and face protection", "1910.134": "Respiratory protection",
+    "1910.135": "Head protection", "1910.136": "Foot protection", "1910.138": "Hand protection", "1910.141": "Sanitation",
+    "1910.142": "Temporary labor camps", "1910.146": "Permit-required confined spaces",
+    "1910.147": "Lockout/tagout (control of hazardous energy)", "1910.151": "Medical services and first aid",
+    "1910.157": "Portable fire extinguishers", "1910.176": "Materials handling and storage",
+    "1910.178": "Powered industrial trucks (forklifts)", "1910.179": "Overhead and gantry cranes", "1910.184": "Slings",
+    "1910.212": "Machine guarding", "1910.213": "Woodworking machinery", "1910.215": "Abrasive wheel machinery",
+    "1910.217": "Mechanical power presses", "1910.219": "Mechanical power-transmission apparatus",
+    "1910.242": "Hand and portable powered tools", "1910.252": "Welding, cutting and brazing",
+    "1910.266": "Logging operations", "1910.269": "Electric power generation, transmission and distribution",
+    "1910.272": "Grain handling facilities", "1910.303": "Electrical: general requirements",
+    "1910.304": "Electrical: wiring design and protection", "1910.305": "Electrical: wiring methods and equipment",
+    "1910.333": "Electrical: safe work practices", "1910.334": "Electrical: use of equipment",
+    "1910.1000": "Air contaminants", "1910.1001": "Asbestos", "1910.1025": "Lead", "1910.1030": "Bloodborne pathogens",
+    "1910.1048": "Formaldehyde", "1910.1053": "Respirable crystalline silica", "1910.1200": "Hazard communication",
+    "1926.20": "General safety and health provisions", "1926.21": "Safety training and education",
+    "1926.25": "Housekeeping", "1926.28": "Personal protective equipment", "1926.50": "Medical services and first aid",
+    "1926.51": "Sanitation", "1926.55": "Gases, vapors, fumes, dusts and mists", "1926.59": "Hazard communication",
+    "1926.62": "Lead", "1926.95": "Personal protective equipment", "1926.100": "Head protection",
+    "1926.102": "Eye and face protection", "1926.103": "Respiratory protection", "1926.150": "Fire protection",
+    "1926.151": "Fire prevention", "1926.152": "Flammable liquids", "1926.300": "Tools: general requirements",
+    "1926.302": "Power-operated hand tools", "1926.403": "Electrical: general requirements",
+    "1926.404": "Electrical: wiring design and protection", "1926.405": "Electrical: wiring methods and equipment",
+    "1926.416": "Electrical: safe work practices", "1926.451": "Scaffolds: general requirements",
+    "1926.452": "Scaffolds: specific types", "1926.453": "Aerial lifts", "1926.454": "Scaffolds: training",
+    "1926.501": "Duty to have fall protection", "1926.502": "Fall protection systems",
+    "1926.503": "Fall protection training", "1926.600": "Equipment", "1926.601": "Motor vehicles",
+    "1926.602": "Material handling equipment", "1926.651": "Excavations: specific requirements",
+    "1926.652": "Excavations: protective systems (cave-ins)", "1926.760": "Steel erection: fall protection",
+    "1926.1051": "Stairways and ladders: general requirements", "1926.1052": "Stairways", "1926.1053": "Ladders",
+    "1926.1060": "Stairways and ladders: training", "1926.1101": "Asbestos", "1926.1153": "Respirable crystalline silica",
+    "1926.1408": "Cranes: power line safety", "1926.1412": "Cranes: inspections",
+    "1926.1427": "Cranes: operator qualification", "1928.110": "Field sanitation",
+}
+_ROMAN = set("ivxl")
+
+
+def osha_standard(code):
+    """OSHA's standard code as a citation: "19260652 A01" -> 29 CFR 1926.652(a)(1), with the section's
+    title and its eCFR page. "5A0001" is the general duty clause, Section 5(a)(1) of the OSH Act."""
+    code = (code or "").strip()
+    if code.upper().startswith("5A"):
+        return {"code": code, "citation": "OSH Act Section 5(a)(1)", "section": None,
+                "title": "General duty clause: a recognized hazard likely to cause death or serious harm", "url": None}
+    m = re.match(r"^(\d{4})(\d{4})\s*(.*)$", code)
+    if not m:
+        return {"code": code, "citation": code, "section": None, "title": None, "url": None}
+    section = f"{m.group(1)}.{int(m.group(2))}"
+    para = ""
+    for tok in m.group(3).split():
+        mt = re.match(r"^([A-Z])(\d+)$", tok)
+        if mt:
+            para += f"({mt.group(1).lower()})({int(mt.group(2))})"
+        elif set(tok.lower()) <= _ROMAN:
+            para += f"({tok.lower()})"
+        elif tok.isdigit():
+            para += f"({int(tok)})"
+        else:
+            para += f"({tok})"
+    part = CFR_PARTS.get(m.group(1))
+    title = CFR_SECTIONS.get(section)
+    return {"code": code, "citation": f"29 CFR {section}{para}", "section": section,
+            "title": f"{part}: {title}" if part and title else part,
+            "url": f"https://www.ecfr.gov/current/title-29/section-{section}"}
+
+
+def osha_ready(con):
+    """True for a database built with OSHA data (older releases have none)."""
+    return _has_table(con, "osha_employer_totals")
+
+
+OSHA_INSPECTION_URL = "https://www.osha.gov/ords/imis/establishment.inspection_detail?id={}"
+_OSHA_ZERO = {"inspections": 0, "zip_links": 0, "inspections_with_violations": 0, "violations": 0, "serious": 0,
+              "willful": 0, "repeat_violations": 0, "initial_penalty": 0, "penalties": 0, "accidents": 0,
+              "deaths": 0, "hospitalized": 0, "first_inspection": None, "latest_inspection": None}
+
+
+def osha_summary(con, employer_id):
+    """Totals of the OSHA inspections linked to this employer (deleted citation items left out), or None
+    when the database has no OSHA data."""
+    if not osha_ready(con):
+        return None
+    r = rows(con, "SELECT * FROM osha_employer_totals WHERE employer_id = ?", employer_id)
+    out = dict(_OSHA_ZERO, employer_id=employer_id)
+    out.update(r[0] if r else {})
+    return out
+
+
+def _osha_codes(con):
+    return {(r["accident_code"], r["accident_number"]): r["accident_value"]
+            for r in rows(con, "SELECT accident_code, accident_number, accident_value FROM osha_codes")}
+
+
+def osha_inspections(con, employer_id):
+    """OSHA inspections linked to this employer, newest first: every inspection column with plain labels,
+    how it was linked, its citation items (with the standard as a citation and title), and any accidents
+    tied to it, with their written account and the injured workers."""
+    if not osha_ready(con):
+        return []
+    out = rows(con, """
+        SELECT i.*, m.method, m.est_false_match_rate, m.osha_name_field, m.osha_address_field, m.employer_name_field,
+               s.file AS source_file, s.sha256 AS source_sha256, s.urls AS source_urls
+        FROM osha_matches m JOIN osha_inspections i USING (activity_nr) JOIN sources s ON s.source_id = i.source_id
+        WHERE m.employer_id = ? ORDER BY i.open_date DESC, i.activity_nr DESC""", employer_id)
+    if not out:
+        return out
+    ids = [i["activity_nr"] for i in out]
+    marks = ",".join("?" * len(ids))
+    viols, text, injuries, accidents = {}, {}, {}, {}
+    for t in rows(con, f"""SELECT activity_nr, citation_id, GROUP_CONCAT(line_text, ' ') AS text FROM
+                           (SELECT * FROM osha_gen_duty_text WHERE activity_nr IN ({marks}) ORDER BY line_nr)
+                           GROUP BY activity_nr, citation_id""", *ids):
+        text[(t["activity_nr"], t["citation_id"])] = t["text"]
+    for v in rows(con, f"""SELECT v.*, s.urls AS source_urls FROM osha_violations v JOIN sources s USING (source_id)
+                           WHERE activity_nr IN ({marks}) ORDER BY activity_nr, citation_id""", *ids):
+        v["deleted"] = (v["delete_flag"] or "") == "X"
+        v["type_label"] = OSHA_VIOLATION_TYPES.get(v["viol_type"], v["viol_type"])
+        v["abatement"] = OSHA_ABATEMENT.get((v["abate_complete"] or "").strip())
+        v["standard_info"] = osha_standard(v["standard"])
+        v["hazard_text"] = text.get((v["activity_nr"], v["citation_id"]))
+        viols.setdefault(v["activity_nr"], []).append(v)
+    codes = _osha_codes(con)
+    for j in rows(con, f"SELECT * FROM osha_injuries WHERE rel_insp_nr IN ({marks}) ORDER BY summary_nr, injury_line_nr",
+                  *ids):
+        j["degree"] = OSHA_DEGREE.get(j["degree_of_inj"])
+        j["nature"] = codes.get(("IN", j["nature_of_inj"]))
+        j["body_part"] = codes.get(("BD", j["part_of_body"]))
+        j["event"] = codes.get(("FT", j["event_type"]))
+        j["occupation"] = codes.get(("OCC", j["occ_code"]))
+        injuries.setdefault(j["summary_nr"], []).append(j)
+    if injuries:
+        sm = ",".join("?" * len(injuries))
+        for a in rows(con, f"""SELECT a.*, (SELECT GROUP_CONCAT(abstract_text, '') FROM (SELECT abstract_text
+                                   FROM osha_accident_text t WHERE t.summary_nr = a.summary_nr ORDER BY line_nr)) AS narrative,
+                                   s.urls AS source_urls
+                               FROM osha_accidents a JOIN sources s USING (source_id) WHERE a.summary_nr IN ({sm})""",
+                          *injuries):
+            a["injuries"] = injuries[a["summary_nr"]]
+            a["narrative"] = re.sub(r"\s+", " ", a["narrative"] or "").strip() or None
+            for nr in {j["rel_insp_nr"] for j in a["injuries"]}:
+                accidents.setdefault(nr, []).append(a)
+    for i in out:
+        i["type_label"] = OSHA_INSPECTION_TYPES.get(i["insp_type"], i["insp_type"])
+        i["scope_label"] = OSHA_SCOPES.get(i["insp_scope"], i["insp_scope"])
+        i["owner_label"] = OSHA_OWNERS.get(i["owner_type"], i["owner_type"])
+        i["focus"] = {"S": "Safety", "H": "Health"}.get(i["safety_hlth"], i["safety_hlth"])
+        i["osha_url"] = OSHA_INSPECTION_URL.format(i["activity_nr"])
+        i["violations"] = viols.get(i["activity_nr"], [])
+        live = [v for v in i["violations"] if not v["deleted"]]
+        i["n_violations"] = len(live)
+        i["initial_penalty"] = sum(v["initial_penalty"] or 0 for v in live)
+        i["penalties"] = sum(v["current_penalty"] or 0 for v in live)
+        i["accidents"] = sorted(accidents.get(i["activity_nr"], []), key=lambda a: a["event_date"] or "", reverse=True)
+    return out
+
+
+def osha_watchlist(con, program=None, state=None, sector=None, with_whd=False, min_applications=1):
+    """Visa employers with linked OSHA inspections, one row per employer, most penalties first, with the
+    totals of their linked WHD cases beside them. `with_whd` keeps employers that also have WHD cases."""
+    if not osha_ready(con):
+        return []
+    where, args = ["e.n_applications >= ?"], [min_applications]
+    if program:
+        where.append("e.program = ?")
+        args.append(program)
+    if state:
+        where.append("e.state = ?")
+        args.append(state)
+    if sector:
+        prefixes = SECTOR_PREFIXES.get(sector)
+        if prefixes is None:
+            raise ValueError(f"Unknown NAICS sector {sector!r}")
+        where.append("(" + " OR ".join("e.naics LIKE ?" for _ in prefixes) + ")")
+        args += [f"{p}%" for p in prefixes]
+    if with_whd:
+        where.append("w.n_cases > 0")
+    return rows(con, f"""
+        SELECT e.employer_id, e.employer_name, e.dba, e.city, e.state, e.program, e.naics, e.n_applications,
+               o.inspections, o.zip_links, o.inspections_with_violations, o.violations, o.serious, o.willful,
+               o.repeat_violations, o.initial_penalty, o.penalties, o.accidents, o.deaths, o.hospitalized,
+               o.latest_inspection, COALESCE(w.n_cases, 0) AS whd_cases, COALESCE(w.back_wages, 0) AS whd_back_wages
+        FROM osha_employer_totals o JOIN employers e USING (employer_id)
+        LEFT JOIN (SELECT m.employer_id, COUNT(*) AS n_cases, COALESCE(SUM(v.bw_atp_amt), 0) AS back_wages
+                   FROM matches m JOIN violation_cases v USING (case_id) GROUP BY m.employer_id) w USING (employer_id)
+        WHERE {" AND ".join(where)}
+        ORDER BY o.penalties DESC, o.violations DESC, e.employer_id""", *args)
+
+
+def osha_overview(con):
+    """Headline OSHA numbers across visa employers, counting each inspection once, or None without OSHA data."""
+    if not osha_ready(con):
+        return None
+    return rows(con, """
+        SELECT (SELECT COUNT(*) FROM osha_employer_totals) AS employers,
+               (SELECT COUNT(*) FROM osha_employer_totals o WHERE EXISTS
+                   (SELECT 1 FROM matches m WHERE m.employer_id = o.employer_id)) AS employers_with_whd,
+               (SELECT COUNT(*) FROM osha_inspections) AS inspections,
+               (SELECT COUNT(*) FROM osha_violations WHERE COALESCE(delete_flag, '') != 'X') AS violations,
+               (SELECT COALESCE(SUM(current_penalty), 0) FROM osha_violations WHERE COALESCE(delete_flag, '') != 'X') AS penalties,
+               (SELECT COUNT(*) FROM osha_injuries WHERE degree_of_inj = 1) AS deaths,
+               (SELECT MIN(open_date) FROM osha_inspections) AS since""")[0]
 
 
 # ---------- Summary tables ----------

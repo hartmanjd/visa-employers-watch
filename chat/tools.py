@@ -2,7 +2,7 @@
 
 Each tool is a thin wrapper over a function in dashboard/queries.py, so the chat answers from the
 same tested queries as the website. Results are trimmed to what an answer needs and always carry
-the record IDs to cite: `employer_id`, WHD `case_id` and LCA/H-2B `case_number`.
+the record IDs to cite: `employer_id`, WHD `case_id`, OSHA `activity_nr` and LCA/H-2B `case_number`.
 """
 import os, sys
 
@@ -14,6 +14,8 @@ MAX_ROWS = 25
 PROGRAMS = ["H-1B", "H-2B"]
 WATCHLIST_SORTS = ["back_wages", "n_cases", "violations", "visa_violations", "workers", "penalties",
                    "n_applications"]
+OSHA_SORTS = ["penalties", "inspections", "violations", "serious", "willful", "repeat_violations", "deaths",
+              "whd_back_wages", "n_applications"]
 GROUP_SORTS = ["employers", "employers_with_cases", "share_with_cases", "cases", "cases_per_100",
                "back_wages", "penalties", "visa_violations"]
 
@@ -32,6 +34,7 @@ DATA_NOTES = """- Applications are FY2025 DOL disclosure records (LCA for H-1B, 
 - red_flags are patterns in the employer's own FY2025 applications (wages at the floor, mostly entry-level wage levels, many withdrawn or denied applications, most workers placed outside the home state). They are reasons for a closer look, not evidence of a violation; say so.
 - dol_debarments are entries on DOL's published debarment lists (H-1B, H-2A, H-2B, permanent labor certification) whose name, and state when DOL gives one, match the employer. Debarment is a DOL enforcement finding. The match is by name, so say it is a name match.
 - representatives are the law firms, agent businesses and individual attorneys or agents named on applications, grouped across every employer they file for (firms by cleaned name, people by name and state). times_typical compares how many of their clients have visa-program violations with what the same mix of H-1B and H-2B employers shows overall. Representing an employer does not make a firm responsible for its violations; say so.
+- osha is the employer's OSHA safety and health inspections (opened 2004 or later), linked by cleaned name plus ZIP code or state of the inspected site or the mailing address, like WHD cases; say it is a name match when one inspection drives your answer. Each inspection lists its citation items: the OSHA standard broken (citation and title), the type (Serious, Willful, Repeat, Other than serious), workers exposed, the penalty OSHA first proposed (initial_penalty) and the current one after settlement or decision (penalty), and whether the hazard was fixed. Deleted citation items are left out. accidents give OSHA's written account of a death or serious injury tied to the inspection and the injured workers (killed, hospitalized). OSHA accident reports are published after the case closes, so recent inspections may have none yet. osha_url is OSHA's own page for the inspection; cite it.
 - willful_violator is the employer's own Yes/No answer on its applications, not a DOL finding. It counts only when most applications say Yes; willful_yes gives the count.
 - Money is in U.S. dollars. back_wages is the back wages WHD found owed; penalties are civil money penalties assessed."""
 
@@ -51,7 +54,8 @@ TOOLS = [
                     "totals of its linked WHD cases, each linked case (case_id, dates, violations, back "
                     "wages, penalties, which laws were violated, how it was matched), its most common jobs and how its offered wages "
                     "compare with the prevailing wage, other rows sharing its tax ID, and any matching entry on DOL's "
-                    "published debarment lists, and the law firms and attorneys or agents that filed its applications with how many of their other clients have visa-program violations.",
+                    "published debarment lists, and the law firms and attorneys or agents that filed its applications with how many of their other clients have visa-program violations, "
+                    "and its linked OSHA inspections with each citation (standard, type, penalty) and any accident reports.",
      "input_schema": _schema({"employer_id": {"type": "integer"}}, ["employer_id"])},
     {"name": "list_applications",
      "description": "An employer's visa applications, newest decision first: case_number, status, job, "
@@ -100,9 +104,22 @@ TOOLS = [
                                                 "back_wages", "clients_debarred"],
                      "description": "Highest first (default clients_visa_violations)"},
          "limit": _LIMIT})},
+    {"name": "osha_watchlist",
+     "description": "Visa employers with linked OSHA safety and health inspections, ranked: inspections, citation "
+                    "items, Serious, Willful and Repeat items, current penalties, deaths in accidents tied to the "
+                    "inspections, and the employer's linked WHD cases and back wages beside them. Use with_whd for "
+                    "employers with both safety and wage records.",
+     "input_schema": _schema({
+         "program": _PROGRAM,
+         "state": {"type": "string", "description": "Two-letter employer state, like TX"},
+         "sector": {"type": "string", "enum": list(q.SECTORS), "description": "NAICS sector key"},
+         "with_whd": {"type": "boolean", "description": "Only employers that also have linked WHD cases"},
+         "min_applications": {"type": "integer", "description": "Only employers with at least this many applications"},
+         "sort_by": {"type": "string", "enum": OSHA_SORTS, "description": "Highest first (default penalties)"},
+         "limit": _LIMIT})},
     {"name": "data_overview",
      "description": "Totals for the whole database: employers, applications, employers with linked "
-                    "cases, cases, back wages and penalties.",
+                    "cases, cases, back wages and penalties, and the OSHA inspections linked to visa employers.",
      "input_schema": _schema({})},
 ]
 
@@ -161,6 +178,36 @@ def get_employer(con, args):
                       for f in q.red_flags(con, eid)],
         "dol_debarments": debarred,
         "representatives": [{k: r[k] for k in _REP_KEEP} for r in q.employer_representatives(con, eid)],
+        **({"osha": _osha(con, eid)} if q.osha_ready(con) else {}),
+    }
+
+
+def _osha(con, eid):
+    insp = q.osha_inspections(con, eid)
+    summary = q.osha_summary(con, eid)
+    return {
+        "totals": {k: (_money(v) if k.endswith("penalty") or k == "penalties" else v)
+                   for k, v in summary.items() if k != "employer_id"},
+        "inspections": [{
+            "activity_nr": i["activity_nr"], "osha_url": i["osha_url"], "establishment": i["estab_name"],
+            "site": f"{i['site_address']}, {i['site_city']}, {i['site_state']} {i['site_zip']}",
+            "opened": (i["open_date"] or "")[:10], "closed": (i["close_case_date"] or "")[:10] or None,
+            "type": i["type_label"], "focus": i["focus"], "scope": i["scope_label"], "employees": i["nr_in_estab"],
+            "initial_penalty": _money(i["initial_penalty"]), "penalty": _money(i["penalties"]),
+            "citations": [{"citation_id": v["citation_id"], "standard": v["standard_info"]["citation"],
+                           "standard_title": v["standard_info"]["title"], "type": v["type_label"],
+                           "gravity": v["gravity"], "workers_exposed": v["nr_exposed"],
+                           "initial_penalty": _money(v["initial_penalty"]), "penalty": _money(v["current_penalty"]),
+                           "abatement": v["abatement"], **({"hazard": v["hazard_text"]} if v["hazard_text"] else {})}
+                          for v in i["violations"] if not v["deleted"]],
+            "accidents": [{"summary_nr": a["summary_nr"], "date": (a["event_date"] or "")[:10],
+                           "description": a["event_desc"], "account": (a["narrative"] or "")[:1500] or None,
+                           "injured": [{k: j[k] for k in ("degree", "nature", "body_part", "age") if j[k]}
+                                       for j in a["injuries"]]}
+                          for a in i["accidents"]],
+            "match": q.match_label(i["method"], i["est_false_match_rate"])}
+            for i in insp[:10]],
+        "inspections_not_shown": max(0, len(insp) - 10),
     }
 
 
@@ -236,6 +283,24 @@ def watchlist(con, args):
                      for r in rows[:_limit(args)]]}
 
 
+def osha_watchlist(con, args):
+    if not q.osha_ready(con):
+        raise LookupError("This database has no OSHA data")
+    rows = q.osha_watchlist(con, program=args.get("program"), state=(args.get("state") or "").upper() or None,
+                            sector=args.get("sector"), with_whd=bool(args.get("with_whd")),
+                            min_applications=int(args.get("min_applications") or 1))
+    key = args.get("sort_by") or "penalties"
+    if key not in OSHA_SORTS:
+        raise ValueError(f"sort_by must be one of {OSHA_SORTS}")
+    rows.sort(key=lambda r: (-(r[key] or 0), r["employer_id"]))
+    keep = ("employer_id", "employer_name", "program", "city", "state", "n_applications", "inspections",
+            "violations", "serious", "willful", "repeat_violations", "initial_penalty", "penalties", "accidents",
+            "deaths", "latest_inspection", "whd_cases", "whd_back_wages")
+    money_keys = ("initial_penalty", "penalties", "whd_back_wages")
+    return {"sorted_by": key, "employers": len(rows),
+            "rows": [{k: (_money(r[k]) if k in money_keys else r[k]) for k in keep} for r in rows[:_limit(args)]]}
+
+
 def _group(con, args, fn, name_key):
     rows = fn(con, program=args.get("program"), visa_violations_only=bool(args.get("visa_violations_only")))
     key = args.get("sort_by") or "employers"
@@ -263,7 +328,11 @@ def industry_stats(con, args):
 
 def data_overview(con, args):
     t = q.overview(con)["totals"]
-    return {k: (_money(v) if k in ("back_wages", "penalties") else v) for k, v in t.items()}
+    out = {k: (_money(v) if k in ("back_wages", "penalties") else v) for k, v in t.items()}
+    o = q.osha_overview(con)
+    if o:
+        out["osha"] = {k: (_money(v) if k == "penalties" else v) for k, v in o.items()}
+    return out
 
 
 RUNNERS = {t["name"]: globals()[t["name"]] for t in TOOLS}

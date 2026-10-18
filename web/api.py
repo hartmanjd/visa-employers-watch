@@ -131,9 +131,19 @@ def employer(employer_id: int):
                 # None while the server is still building these after a restart; the page skips them.
                 "red_flags": q.red_flags(c, employer_id) if q.red_flags_ready(c) else None,
                 "debarments": q.employer_debarments(c, employer_id),
+                # None for a database built without OSHA data; the page then leaves the section out.
+                "osha": {"summary": q.osha_summary(c, employer_id), "inspections": osha_inspections(c, employer_id)}
+                        if q.osha_ready(c) else None,
                 "representatives": q.employer_representatives(c, employer_id) if q.representatives_ready(c) else None}
     finally:
         c.close()
+
+
+def osha_inspections(c, employer_id):
+    out = q.osha_inspections(c, employer_id)
+    for i in out:
+        i["match_label"] = q.match_label(i["method"], i["est_false_match_rate"])
+    return out
 
 
 @app.get("/api/employers/{employer_id}/applications")
@@ -194,6 +204,22 @@ def watchlist(program: str | None = None, state: str | None = None,
     c = con()
     try:
         return {"rows": q.watchlist(c, **filters), "totals": q.watchlist_totals(c, **filters)}
+    finally:
+        c.close()
+
+
+@app.get("/api/osha")
+def osha(program: str | None = None, state: str | None = None, sector: str | None = None, with_whd: bool = False,
+         min_apps: int = Query(1, ge=1)):
+    """Visa employers with linked OSHA inspections, and OSHA totals across all visa employers."""
+    check_program(program)
+    if sector and sector not in q.SECTORS:
+        raise HTTPException(422, "Unknown sector")
+    c = con()
+    try:
+        return {"rows": q.osha_watchlist(c, program=program or None, state=state or None, sector=sector or None,
+                                         with_whd=with_whd, min_applications=min_apps),
+                "totals": q.osha_overview(c)}
     finally:
         c.close()
 
@@ -324,6 +350,39 @@ def cases_csv(employer_id: int):
     finally:
         c.close()
     return csv_response(rows, CASES_CSV, f"employer-{employer_id}-whd-cases.csv")
+
+
+OSHA_CSV = ["activity_nr", "estab_name", "site_address", "site_city", "site_state", "site_zip", "mail_street",
+            "mail_city", "mail_state", "mail_zip", "open_date", "close_case_date", "insp_type", "type_label",
+            "insp_scope", "safety_hlth", "nr_in_estab", "citation_id", "deleted", "standard", "citation", "standard_title",
+            "viol_type", "violation_type", "gravity", "nr_exposed", "nr_instances", "initial_penalty", "current_penalty",
+            "issuance_date", "abate_date", "abatement", "final_order_date", "contest_date", "method", "osha_name_field",
+            "osha_address_field", "employer_name_field", "match_label", "osha_url", "load_dt", "source_file",
+            "source_urls", "employer_id", "employer_page"]
+
+
+@app.get("/api/employers/{employer_id}/osha.csv")
+def osha_csv(employer_id: int):
+    """The OSHA inspections linked to this employer, one row per citation item (an inspection with none has one
+    row with the citation columns empty), with OSHA's activity numbers and how each inspection was linked."""
+    c = con()
+    try:
+        if not q.employer(c, employer_id):
+            raise HTTPException(404, "No employer with that id")
+        rows = []
+        for i in osha_inspections(c, employer_id):
+            base = {k: v for k, v in i.items() if k not in ("violations", "accidents")}
+            base.update(employer_id=employer_id, employer_page=employer_page(employer_id))
+            for v in i["violations"] or [{}]:
+                std = v.get("standard_info") or {}
+                rows.append({**base, **{k: v.get(k) for k in ("citation_id", "standard", "viol_type", "gravity",
+                             "nr_exposed", "nr_instances", "initial_penalty", "current_penalty", "issuance_date",
+                             "abate_date", "final_order_date", "contest_date")},
+                             "deleted": v.get("deleted"), "citation": std.get("citation"), "standard_title": std.get("title"),
+                             "violation_type": v.get("type_label"), "abatement": v.get("abatement")})
+    finally:
+        c.close()
+    return csv_response(rows, OSHA_CSV, f"employer-{employer_id}-osha.csv")
 
 
 DEBARMENTS_CSV = ["program", "entity", "entity_type", "location", "state", "start_date", "end_date", "status",
