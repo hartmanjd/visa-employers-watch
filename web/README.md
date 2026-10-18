@@ -24,7 +24,7 @@ From the repo root:
    Then open http://localhost:8000 in a browser. `--reload` restarts the server when a file changes.
 
 The site reads `h1b-data/research.db`. If that file is missing, it downloads a gzipped copy (about 219 MB) from
-the repo's `data-2026-10-17b` release on first start, checks its SHA-256 and unpacks it there. To use your own
+the repo's `data-2026-10-18` release on first start, checks its SHA-256 and unpacks it there. To use your own
 build instead, run `h1b-data/scripts/build_db.py` (see `h1b-data/README.md`) or copy a `research.db` into
 `h1b-data/` before starting.
 
