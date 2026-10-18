@@ -155,11 +155,32 @@ def fetch_by(table, field, ids, path):
                    params={"filter_field": field, "ids": len(ids)})
 
 
+def fetch_range(table, field, ids, path, step=2_000_000):
+    """Like fetch_by, but asks for every row whose `field` falls in a block of `step` numbers that holds
+    one of `ids`, 10,000 rows a request, and keeps the rows for `ids`. Fewer requests than lists of 100
+    when the table is small next to the inspections, as the injury table is."""
+    if os.path.exists(path + ".manifest.json"):
+        return
+    cols, want = DETAILS[table][1], set(ids)
+    blocks = sorted({i // step for i in want})
+    with open(path, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=cols, extrasaction="ignore")
+        w.writeheader()
+        for k, b in enumerate(blocks):
+            flt = {"and": [{"field": field, "operator": "gte", "value": b * step},
+                           {"field": field, "operator": "lt", "value": (b + 1) * step}]}
+            w.writerows(r for r in get_all(table, flt, page_size=INDEX_PAGE) if int(r[field]) in want)
+            print(table, k + 1, "/", len(blocks), "blocks", file=sys.stderr)
+    write_manifest(path, __file__, sources=[{"url": BASE.format(table), "note": f"DOL OSHA {table} dataset"}],
+                   params={"filter_field": field, "ids": len(want), "block": step})
+
+
 def details(ids_file, outdir):
     os.makedirs(outdir, exist_ok=True)
     ids = [int(x) for x in open(ids_file).read().split()]
-    for table in ("inspection", "violation", "accident_injury"):
+    for table in ("inspection", "violation"):
         fetch_by(table, DETAILS[table][0], ids, os.path.join(outdir, f"osha_{table}.csv"))
+    fetch_range("accident_injury", "rel_insp_nr", ids, os.path.join(outdir, "osha_accident_injury.csv"))
     # The written hazard exists only for general duty clause citations (standard 5A0001).
     with open(os.path.join(outdir, "osha_violation.csv"), newline="") as f:
         gen_duty = [int(r["activity_nr"]) for r in csv.DictReader(f) if r["standard"].strip().upper().startswith("5A")]

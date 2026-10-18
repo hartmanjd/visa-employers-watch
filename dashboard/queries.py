@@ -31,8 +31,8 @@ DEBARMENTS_CSV = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", 
 
 # A gzipped copy of research.db published as a GitHub release asset, for hosts (like Render)
 # that only have the git checkout. The checksum is of the .gz file at that URL.
-DB_URL = "https://github.com/hartmanjd/visa-employers-watch/releases/download/data-2026-10-17b/research.db.gz"
-DB_SHA256 = "7f30c6f766a8c2c658881d471e3965391c977bd0e932c46bdd2ef678b3a3c0d3"
+DB_URL = "https://github.com/hartmanjd/visa-employers-watch/releases/download/data-2026-10-18/research.db.gz"
+DB_SHA256 = "89939f5a353fb16e8a40365dd8fd9ad6f8bdee57f08efefef44cde4ea34259b9"
 
 
 def connect(path=None):
@@ -47,17 +47,18 @@ def connect(path=None):
 
 
 def _older_layout(path):
-    """True for a database that predates the full disclosure columns or the full WHD columns."""
+    """True for a database that predates the full disclosure columns, the full WHD columns or the OSHA tables."""
     try:
         con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
         try:
             cols = {r[1] for r in con.execute("PRAGMA table_info(applications)")}
             whd = {r[1] for r in con.execute("PRAGMA table_info(violation_cases)")}
+            osha = con.execute("SELECT 1 FROM sqlite_master WHERE name = 'osha_employer_totals'").fetchone()
         finally:
             con.close()
     except sqlite3.DatabaseError:
         return False
-    return bool(cols) and ("job_title" not in cols or "flsa_cl_violtn_cnt" not in whd)
+    return bool(cols) and ("job_title" not in cols or "flsa_cl_violtn_cnt" not in whd or not osha)
 
 
 def download_db(path=None, url=None, sha256=None):
