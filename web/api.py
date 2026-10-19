@@ -487,7 +487,8 @@ def ask(body: dict, request: Request):
 def _page(name, media_type):
     """A static page with the published address swapped for the one this server runs at."""
     with open(os.path.join(HERE, "static", name), encoding="utf-8") as f:
-        return Response(f.read().replace(engine.PUBLISHED_URL, SITE_URL), media_type=media_type)
+        return Response(f.read().replace(engine.PUBLISHED_URL, SITE_URL), media_type=media_type,
+                        headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/", include_in_schema=False)
@@ -501,4 +502,14 @@ def llms_txt():
     return _page("llms.txt", "text/plain")
 
 
-app.mount("/", StaticFiles(directory=os.path.join(HERE, "static"), html=True), name="static")
+class FreshStaticFiles(StaticFiles):
+    """Static files the browser checks with the server before reusing, so a new release's app.js and
+    styles.css reach visitors at once instead of a cached copy that does not match the new page."""
+
+    def file_response(self, *args, **kwargs):
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
+app.mount("/", FreshStaticFiles(directory=os.path.join(HERE, "static"), html=True), name="static")
