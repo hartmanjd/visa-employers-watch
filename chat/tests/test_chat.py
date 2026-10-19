@@ -59,6 +59,10 @@ class ChatTests(unittest.TestCase):
         w = tools.run_tool(self.con, "watchlist", {"visa_violations_only": True})
         self.assertEqual((w["employers"], w["rows"][0]["employer_id"], w["rows"][0]["visa_violations"]), (1, self.acme, 2))
         self.assertEqual(tools.run_tool(self.con, "get_application", {"case_number": "i-1"})["employer_id"], self.acme)
+        self.assertEqual([y["fiscal_year"] for y in e["filing_years"]], [2024, 2025])
+        self.assertEqual(tools.run_tool(self.con, "watchlist", {"filed_in": 2020})["employers"], 0)
+        self.assertEqual([y["fiscal_year"] for y in tools.run_tool(self.con, "data_overview", {})["fiscal_years"]],
+                         [2024, 2025])
         with self.assertRaises(LookupError):
             tools.run_tool(self.con, "get_application", {"case_number": "I-404"})
         with self.assertRaises(ValueError):

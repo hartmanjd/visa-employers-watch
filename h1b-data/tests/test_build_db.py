@@ -141,6 +141,28 @@ class BuildDbTests(unittest.TestCase):
         self.assertEqual(self.q("SELECT n_applications FROM employers WHERE name_clean='ACME SOFTWARE'"
                                 " AND program='H-1B'"), [(2,)])
 
+    def test_counts_applications_per_fiscal_year_in_chunks(self):
+        p = lambda n: os.path.join(self.d, n)
+        write_csv(p("LCA_FY2024.csv"), [filing("I-1", "Acme Software LLC", "TX", "78701", "111111111"),
+                                        filing("I-5", "Acme Software LLC", "TX", "78701", "111111111",
+                                               status="Withdrawn")])
+        write_csv(p("LCA_FY2025.csv"), [filing("I-2", "ACME SOFTWARE, INC.", "TX", "78701", "111111111"),
+                                        filing("I-3", "Delta Labs", "CA", "94105", "333333333")])
+        db = p("years.db")
+        args = [db, "--lca", p("filers_years.csv")] + self.args[3:]
+        with mock.patch("sys.stdout", io.StringIO()), mock.patch.object(build_db, "APP_CHUNK", 1):
+            build_filers.main([p("filers_years.csv"), p("LCA_FY2024.csv"), p("LCA_FY2025.csv")])
+            build_db.main(args)
+        con = sqlite3.connect(db)
+        self.addCleanup(con.close)
+        self.assertEqual(con.execute("SELECT e.name_clean, y.fiscal_year, y.applications, y.certified"
+                                     " FROM employer_years y JOIN employers e USING (employer_id)"
+                                     " ORDER BY 1, 2").fetchall(),
+                         [("ACME SOFTWARE", 2024, 2, 1), ("ACME SOFTWARE", 2025, 1, 1), ("DELTA LABS", 2025, 1, 1)])
+        self.assertEqual(con.execute("SELECT first_fiscal_year, last_fiscal_year, n_applications FROM employers"
+                                     " WHERE name_clean = 'ACME SOFTWARE' AND program = 'H-1B'").fetchall(),
+                         [(2024, 2025, 3)])
+
     def test_matches_use_the_strongest_rule_and_carry_its_error_rate(self):
         rows = self.q("SELECT m.case_id, e.name_clean, e.program, m.method, m.est_false_match_rate,"
                       " m.whd_name_field, m.employer_name_field FROM matches m"
@@ -241,6 +263,51 @@ class OshaBuildTests(unittest.TestCase):
         self.assertEqual(self.q("SELECT urls FROM sources WHERE file='osha_violation.csv'"), [(fetch_osha.BASE.format("violation"),)])
         m = provenance.verify_manifest(self.db)
         self.assertEqual((m["params"]["osha_opened_since"], m["params"]["tables"]["osha_matches"]), ("2004-01-01", 2))
+
+
+class OshaMergeTests(unittest.TestCase):
+    def test_merge_keeps_each_row_once_and_lists_its_inputs(self):
+        d = tempfile.mkdtemp()
+        old, new, out = write_osha(os.path.join(d, "old")), write_osha(os.path.join(d, "new")), os.path.join(d, "all")
+        path = os.path.join(new, "osha_inspection.csv")
+        with open(path, newline="") as f:
+            rows = list(csv.DictReader(f))
+        write_csv(path, rows + [{**rows[0], "activity_nr": "900005", "estab_name": "NEW CO"}],
+                  fetch_osha.DETAILS["inspection"][1])
+        provenance.write_manifest(path, fetch_osha.__file__, sources=[{"url": fetch_osha.BASE.format("inspection")}])
+        with mock.patch("sys.stdout", io.StringIO()):
+            fetch_osha.merge(out, old, new)
+        with open(os.path.join(out, "osha_inspection.csv"), newline="") as f:
+            self.assertEqual([r["activity_nr"] for r in csv.DictReader(f)],
+                             ["900001", "900002", "900003", "900004", "900005"])
+        m = provenance.verify_manifest(os.path.join(out, "osha_violation.csv"))
+        self.assertEqual((m["rows"], len(m["inputs"]), m["sources"]),
+                         (5, 2, [{"url": fetch_osha.BASE.format("violation")}]))
+        self.assertEqual(provenance.verify_manifest(os.path.join(out, "osha_accident_lookup2.csv"))["rows"], 2)
+
+
+class OshaFetchResumeTests(unittest.TestCase):
+    def test_a_cut_off_table_continues_from_its_last_batch(self):
+        path = os.path.join(tempfile.mkdtemp(), "osha_inspection.csv")
+        asked = []
+
+        def fake(table, flt, **kw):
+            asked.append(flt["value"])
+            if len(asked) == 2 and not os.path.exists(path + ".resumed"):
+                raise SystemExit("API kept failing")
+            return [{"activity_nr": str(i), "estab_name": f"CO {i}"} for i in flt["value"]]
+
+        with mock.patch.object(fetch_osha, "BATCH", 2), mock.patch.object(fetch_osha, "get_all", fake), \
+                mock.patch("sys.stderr", io.StringIO()):
+            with self.assertRaises(SystemExit):
+                fetch_osha.fetch_by("inspection", "activity_nr", [5, 1, 3, 2, 4], path)
+            open(path + ".resumed", "w").close()
+            fetch_osha.fetch_by("inspection", "activity_nr", [5, 1, 3, 2, 4], path)
+        self.assertEqual(asked, [[1, 2], [3, 4], [3, 4], [5]])  # the first batch is not asked for again
+        with open(path, newline="") as f:
+            self.assertEqual([r["activity_nr"] for r in csv.DictReader(f)], ["1", "2", "3", "4", "5"])
+        self.assertEqual(provenance.verify_manifest(path)["rows"], 5)
+        self.assertFalse(os.path.exists(path + ".progress"))
 
 
 class XlsxToCsvTests(unittest.TestCase):

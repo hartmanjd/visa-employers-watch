@@ -92,7 +92,8 @@ def overview():
 def meta():
     c = con()
     try:
-        return {"states": q.states(c), "sectors": q.SECTORS, "sources": q.sources(c)}
+        return {"states": q.states(c), "sectors": q.SECTORS, "years": [y["fiscal_year"] for y in _overview()["years"]],
+                "sources": q.sources(c)}
     finally:
         c.close()
 
@@ -127,7 +128,8 @@ def employer(employer_id: int):
         e["sector_name"] = q.SECTORS.get(e["sector"])
         return {"employer": e, "summary": q.summary(c, employer_id),
                 "same_tax_id": q.same_tax_id(c, employer_id), "cases": cases,
-                "case_years": q.case_years(c, employer_id), "profile": q.employer_profile(c, employer_id),
+                "case_years": q.case_years(c, employer_id), "filing_years": q.filing_years(c, employer_id),
+                "profile": q.employer_profile(c, employer_id),
                 # None while the server is still building these after a restart; the page skips them.
                 "red_flags": q.red_flags(c, employer_id) if q.red_flags_ready(c) else None,
                 "debarments": q.employer_debarments(c, employer_id),
@@ -195,12 +197,14 @@ def debarments():
 @app.get("/api/watchlist")
 def watchlist(program: str | None = None, state: str | None = None,
               since: int | None = Query(None, ge=1900, le=2100), visa_only: bool = False,
-              min_apps: int = Query(1, ge=1), sector: str | None = None):
+              min_apps: int = Query(1, ge=1), sector: str | None = None,
+              filed: int | None = Query(None, ge=1900, le=2100)):
     check_program(program)
     if sector and sector not in q.SECTORS:
         raise HTTPException(422, "Unknown sector")
     filters = dict(program=program or None, state=state or None, since_year=since,
-                   visa_violations_only=visa_only, min_applications=min_apps, sector=sector or None)
+                   visa_violations_only=visa_only, min_applications=min_apps, sector=sector or None,
+                   filed_in=filed)
     c = con()
     try:
         return {"rows": q.watchlist(c, **filters), "totals": q.watchlist_totals(c, **filters)}
@@ -281,7 +285,7 @@ def employer_page(employer_id):
 
 
 WATCHLIST_CSV = ["employer_id", "employer_name", "dba", "city", "state", "program", "naics", "n_applications",
-                 "n_certified", "n_cases", "zip_links", "violations", "h1b_violations", "h2b_violations",
+                 "n_certified", "first_fiscal_year", "last_fiscal_year", "n_cases", "zip_links", "violations", "h1b_violations", "h2b_violations",
                  "back_wages", "workers", "penalties", "latest_case", "willful_yes", "willful_violator",
                  "h1b_dependent", "whd_case_ids", "employer_page"]
 
@@ -289,13 +293,15 @@ WATCHLIST_CSV = ["employer_id", "employer_name", "dba", "city", "state", "progra
 @app.get("/api/watchlist.csv")
 def watchlist_csv(program: str | None = None, state: str | None = None,
                   since: int | None = Query(None, ge=1900, le=2100), visa_only: bool = False,
-                  min_apps: int = Query(1, ge=1), sector: str | None = None):
+                  min_apps: int = Query(1, ge=1), sector: str | None = None,
+                  filed: int | None = Query(None, ge=1900, le=2100)):
     """The watchlist with the same filters, each employer with the WHD case IDs behind its row."""
     check_program(program)
     if sector and sector not in q.SECTORS:
         raise HTTPException(422, "Unknown sector")
     filters = dict(program=program or None, state=state or None, since_year=since,
-                   visa_violations_only=visa_only, min_applications=min_apps, sector=sector or None)
+                   visa_violations_only=visa_only, min_applications=min_apps, sector=sector or None,
+                   filed_in=filed)
     c = con()
     try:
         ids = q.watchlist_case_ids(c, **filters)
@@ -303,12 +309,13 @@ def watchlist_csv(program: str | None = None, state: str | None = None,
                 for r in q.watchlist(c, **filters)]
     finally:
         c.close()
-    parts = [program, state, sector, f"since-{since}" if since else None, "visa-only" if visa_only else None]
+    parts = [program, state, sector, f"since-{since}" if since else None, f"filed-fy{filed}" if filed else None,
+             "visa-only" if visa_only else None]
     name = "-".join(["watchlist", *[p for p in parts if p]])
     return csv_response(rows, WATCHLIST_CSV, f"{name}.csv")
 
 
-APPLICATIONS_CSV = ["case_number", "employer_id", "program", "case_status", "visa_class", "decision_date", "fein",
+APPLICATIONS_CSV = ["case_number", "employer_id", "program", "fiscal_year", "case_status", "visa_class", "decision_date", "fein",
                     "job_title", "soc_code", "soc_title", "workers", "begin_date", "end_date", "worksite_city",
                     "worksite_state", "wage_from", "wage_to", "wage_unit", "prevailing_wage", "pw_unit_of_pay",
                     "pw_wage_level", "lawfirm", "source_file", "dol_file_url", "table_file", "table_sha256",

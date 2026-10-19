@@ -22,7 +22,12 @@ Three steps, so that full records are downloaded only for inspections linked to 
       accident_injury (by rel_insp_nr), and for the accidents found there, accident and
       accident_abstract (the written account); plus accident_lookup2, OSHA's code list
       for the injury columns. One CSV per table in OUTDIR, named osha_<table>.csv. A re-run
-      skips the tables already finished (those with a manifest).
+      skips the tables already finished (those with a manifest) and continues a cut-off
+      table from its last finished batch.
+
+  python3 fetch_osha.py merge OUTDIR DIR1 DIR2 ...
+      Combines details folders (say, an earlier download and one for the inspections of
+      employers added since) into OUTDIR, keeping each row once.
 
 Each CSV gets OUT.csv.manifest.json recording the source URL, download time, row count
 and checksum. Every row keeps DOL's load_dt (when DOL loaded it).
@@ -141,18 +146,30 @@ def index(out, since, before=None):
 
 
 def fetch_by(table, field, ids, path):
+    """Rows of `table` whose `field` is one of `ids`, 100 ids a request. After each batch the number of ids
+    done is saved to PATH.progress, so a re-run after the API gives up continues from there."""
     if os.path.exists(path + ".manifest.json"):  # finished in an earlier run
         return
     cols = DETAILS[table][1]
     ids = sorted(set(ids))
+    done = int(open(path + ".progress").read()) if os.path.exists(path + ".progress") and os.path.exists(path) else 0
+    if done:  # keep the rows of the finished batches, dropping any of a batch cut off part-way
+        with open(path, newline="") as f:
+            kept = [r for r in csv.DictReader(f) if done >= len(ids) or int(r[field]) < ids[done]]
     with open(path, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=cols, extrasaction="ignore")
         w.writeheader()
-        for i in range(0, len(ids), BATCH):
+        if done:
+            w.writerows(kept)
+        for i in range(done, len(ids), BATCH):
             w.writerows(get_all(table, {"field": field, "operator": "in", "value": ids[i:i + BATCH]}))
+            f.flush()
+            with open(path + ".progress", "w") as pf:
+                pf.write(str(min(i + BATCH, len(ids))))
             print(table, min(i + BATCH, len(ids)), "/", len(ids), file=sys.stderr)
     write_manifest(path, __file__, sources=[{"url": BASE.format(table), "note": f"DOL OSHA {table} dataset"}],
                    params={"filter_field": field, "ids": len(ids)})
+    os.remove(path + ".progress")
 
 
 def fetch_range(table, field, ids, path, step=2_000_000):
@@ -199,10 +216,36 @@ def details(ids_file, outdir):
     print(f"wrote details for {len(ids)} inspections to {outdir}")
 
 
+def merge(outdir, *dirs):
+    """Combines details folders, such as an earlier download and one for inspections linked since,
+    into OUTDIR, keeping each row once. Each table's manifest lists the files it came from."""
+    os.makedirs(outdir, exist_ok=True)
+    for table, cols in [(t, c) for t, (_, c) in DETAILS.items()] + [("accident_lookup2", LOOKUP_FIELDS)]:
+        name = f"osha_{table}.csv"
+        ins = [os.path.join(d, name) for d in dirs if os.path.exists(os.path.join(d, name))]
+        path, seen, sources = os.path.join(outdir, name), set(), []
+        with open(path, "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=cols, extrasaction="ignore")
+            w.writeheader()
+            for p in ins:
+                with open(p + ".manifest.json") as m:
+                    sources += [s for s in json.load(m).get("sources", []) if s not in sources]
+                with open(p, newline="") as g:
+                    for r in csv.DictReader(g):
+                        key = tuple(r.get(c, "") for c in cols if c != "load_dt")
+                        if key not in seen:
+                            seen.add(key)
+                            w.writerow(r)
+        write_manifest(path, __file__, inputs=ins, sources=sources)
+    print(f"merged {len(dirs)} folders into {outdir}")
+
+
 if __name__ == "__main__":
     if len(sys.argv) in (4, 5) and sys.argv[1] == "index":
         index(*sys.argv[2:])
     elif len(sys.argv) == 4 and sys.argv[1] == "details":
         details(sys.argv[2], sys.argv[3])
+    elif len(sys.argv) >= 4 and sys.argv[1] == "merge":
+        merge(*sys.argv[2:])
     else:
         raise SystemExit(__doc__)

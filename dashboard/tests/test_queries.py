@@ -23,9 +23,11 @@ def make_db(d):
            "LAWFIRM_NAME_BUSINESS_NAME": "Law Firm LLP", "AGENT_ATTORNEY_FIRST_NAME": "Ann",
            "AGENT_ATTORNEY_LAST_NAME": "Lee", "EMPLOYER_POC_EMAIL": "hr@acme.example"}
     write_csv(p("lca.csv"), [
-        {**filing("I-1", "Acme Software LLC", "TX", "78701", "111111111"), **job},  # offers $95,000.50
+        {**filing("I-1", "Acme Software LLC", "TX", "78701", "111111111"), **job,  # offers $95,000.50
+         "DECISION_DATE": "2025-03-01"},  # fiscal year 2025
         {**filing("I-2", "ACME SOFTWARE, INC.", "TX", "78701", "111111111", status="Withdrawn"), **job,
-         "WAGE_RATE_OF_PAY_FROM": "45", "WAGE_UNIT_OF_PAY": "Hour", "WORKSITE_CITY": "Dallas"},
+         "WAGE_RATE_OF_PAY_FROM": "45", "WAGE_UNIT_OF_PAY": "Hour", "WORKSITE_CITY": "Dallas",
+         "DECISION_DATE": "2023-11-15"},  # fiscal year 2024
         filing("I-3", "Acme Software", "CA", "94105", "111111111"),
         filing("I-4", "Acme Analytics", "NY", "10001", "444444444"),
     ])
@@ -167,6 +169,20 @@ class QueryTests(unittest.TestCase):
         self.assertEqual((top["n_cases"], top["zip_links"], top["back_wages"], top["penalties"]),
                          (2, 1, 1500.0, 250.0))
         self.assertEqual((top["h1b_violations"], top["latest_case"]), (2, "2023-02-01"))
+
+    def test_fiscal_years(self):
+        eid = self.acme_tx()["employer_id"]
+        self.assertEqual(queries.filing_years(self.con, eid),
+                         [{"fiscal_year": 2024, "applications": 1, "certified": 0},
+                          {"fiscal_year": 2025, "applications": 1, "certified": 1}])
+        self.assertEqual([(r["fiscal_year"], r["H-1B"], r["H-2B"], r["employers"]) for r in queries.fiscal_years(self.con)],
+                         [(2024, 1, 0, 1), (2025, 1, 0, 1)])
+        self.assertEqual([a["fiscal_year"] for a in queries.applications(self.con, eid)], [2025, 2024])
+        names = lambda **kw: [(r["program"], r["first_fiscal_year"], r["last_fiscal_year"])
+                              for r in queries.watchlist(self.con, **kw)]
+        self.assertEqual(names(filed_in=2024), [("H-1B", 2024, 2025)])
+        self.assertEqual(names(filed_in=2020), [])
+        self.assertEqual(queries.watchlist_totals(self.con, filed_in=2020)["cases"], 0)
 
     def test_watchlist_filters(self):
         names = lambda **kw: [(r["program"], r["n_cases"]) for r in queries.watchlist(self.con, **kw)]
@@ -310,6 +326,17 @@ class DownloadTests(unittest.TestCase):
         queries.download_db(self.target, self.url, self.sha)
         con = queries.connect(self.target)
         self.assertIsNotNone(queries.application(con, "I-1"))
+
+    def test_a_database_without_fiscal_years_is_replaced(self):
+        con = sqlite3.connect(self.target)
+        con.execute("CREATE TABLE applications (case_number TEXT, job_title TEXT)")
+        con.execute("CREATE TABLE violation_cases (case_id INTEGER, flsa_cl_violtn_cnt INTEGER)")
+        con.execute("CREATE TABLE osha_employer_totals (employer_id INTEGER)")
+        con.commit()
+        con.close()
+        queries.download_db(self.target, self.url, self.sha)
+        con = queries.connect(self.target)
+        self.assertEqual([y["fiscal_year"] for y in queries.fiscal_years(con)], [2024, 2025])
 
     def test_existing_database_is_not_downloaded_again(self):
         open(self.target, "w").close()

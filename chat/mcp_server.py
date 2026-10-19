@@ -17,7 +17,7 @@ from .engine import SITE_URL
 PROTOCOL_VERSIONS = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"]
 SERVER_INFO = {"name": "visa-employer-watch", "title": "Visa Employer Watch", "version": "1.0.0"}
 
-INSTRUCTIONS = f"""Lookups over U.S. employers that filed H-1B or H-2B visa applications in fiscal year 2025, the Department of Labor Wage and Hour Division (WHD) enforcement cases linked to them, and the OSHA safety and health inspections linked to them. Answer only from what the tools return.
+INSTRUCTIONS = f"""Lookups over U.S. employers that filed H-1B or H-2B visa applications in the fiscal years the data covers (data_overview lists them), the Department of Labor Wage and Hour Division (WHD) enforcement cases linked to them, and the OSHA safety and health inspections linked to them. Answer only from what the tools return.
 
 When you mention a record, link it to the website so readers can check it:
 - employer: {SITE_URL}/#/employer/<employer_id>

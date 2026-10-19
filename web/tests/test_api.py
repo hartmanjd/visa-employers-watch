@@ -87,6 +87,20 @@ class ApiTests(unittest.TestCase):
         d = self.client.get("/api/watchlist", params={"visa_only": "true"}).json()
         self.assertEqual([r["program"] for r in d["rows"]], ["H-1B"])
         self.assertEqual(self.client.get("/api/watchlist", params={"program": "H-3"}).status_code, 422)
+        d = self.client.get("/api/watchlist", params={"filed": 2024}).json()
+        self.assertEqual([(r["program"], r["first_fiscal_year"], r["last_fiscal_year"]) for r in d["rows"]],
+                         [("H-1B", 2024, 2025)])
+        r, rows = self.csv_rows("/api/watchlist.csv", filed=2024)
+        self.assertIn('filename="watchlist-filed-fy2024.csv"', r.headers["content-disposition"])
+        self.assertEqual([x["first_fiscal_year"] for x in rows], ["2024"])
+
+    def test_fiscal_years(self):
+        self.assertEqual(self.client.get("/api/meta").json()["years"], [2024, 2025])
+        o = self.client.get("/api/overview").json()
+        self.assertEqual([(y["fiscal_year"], y["applications"]) for y in o["years"]], [(2024, 1), (2025, 1)])
+        self.assertEqual(o["latest_decision"], "2025-03-01")
+        e = self.client.get(f"/api/employers/{self.acme_tx()['employer_id']}").json()
+        self.assertEqual([(y["fiscal_year"], y["applications"]) for y in e["filing_years"]], [(2024, 1), (2025, 1)])
 
     def test_state_and_sector_stats(self):
         states = self.client.get("/api/states").json()

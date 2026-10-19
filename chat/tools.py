@@ -25,13 +25,13 @@ def _schema(props, required=()):
 
 
 # What the fields mean, for any model that reads the tool results (the chat and the MCP server).
-DATA_NOTES = """- Applications are FY2025 DOL disclosure records (LCA for H-1B, H-2B certifications), one row per case number, latest status.
+DATA_NOTES = """- Applications are DOL disclosure records (LCA for H-1B, H-2B certifications) from every fiscal year in the data (data_overview lists them; a federal fiscal year runs October to September), one row per case number, latest status. Each application has its fiscal_year; each employer its first_fiscal_year, last_fiscal_year and applications per year (filing_years).
 - An employer row is one company name at one address in one program; one company can have several rows. Rows sharing a tax ID are listed under same_tax_id_elsewhere.
 - WHD cases cover every law WHD enforces (minimum wage, overtime, child labor, H-1B, H-2B, H-2A and others) and every year in the data, not only visa violations. Say "visa-program violations" only for h1b_violations on an H-1B employer or h2b_violations on an H-2B employer.
 - WHD records have no tax ID, so cases are linked to employers by cleaned name plus ZIP code or state. Some links are wrong (about 3 to 4 percent in a tax-ID test). When a single case drives your answer, mention that it is a name match.
 - A case with 0 violations and $0 back wages means WHD investigated and recorded no violations.
 - Each case's laws list says which laws WHD found violations under (minimum wage and overtime, child labor, family leave, federal contracts, the visa programs and others), with violations, back wages, workers owed and penalties for each. child_labor_minors, repeat_violator (WHD's own Repeat or Willful finding under the FLSA) and the minimum wage, overtime and retaliation back wage split appear when WHD recorded them. WHD publishes these counts, not a description of what happened.
-- red_flags are patterns in the employer's own FY2025 applications (wages at the floor, mostly entry-level wage levels, many withdrawn or denied applications, most workers placed outside the home state). They are reasons for a closer look, not evidence of a violation; say so.
+- red_flags are patterns in the employer's own applications across every fiscal year in the data (wages at the floor, mostly entry-level wage levels, many withdrawn or denied applications, most workers placed outside the home state). They are reasons for a closer look, not evidence of a violation; say so.
 - dol_debarments are entries on DOL's published debarment lists (H-1B, H-2A, H-2B, permanent labor certification) whose name, and state when DOL gives one, match the employer. Debarment is a DOL enforcement finding. The match is by name, so say it is a name match.
 - representatives are the law firms, agent businesses and individual attorneys or agents named on applications, grouped across every employer they file for (firms by cleaned name, people by name and state). times_typical compares how many of their clients have visa-program violations with what the same mix of H-1B and H-2B employers shows overall. Representing an employer does not make a firm responsible for its violations; say so.
 - osha is the employer's OSHA safety and health inspections (opened 2004 or later), linked by cleaned name plus ZIP code or state of the inspected site or the mailing address, like WHD cases; say it is a name match when one inspection drives your answer. Each inspection lists its citation items: the OSHA standard broken (citation and title), the type (Serious, Willful, Repeat, Other than serious), workers exposed, the penalty OSHA first proposed (initial_penalty) and the current one after settlement or decision (penalty), and whether the hazard was fixed. Deleted citation items are left out. accidents give OSHA's written account of a death or serious injury tied to the inspection and the injured workers (killed, hospitalized). OSHA accident reports are published after the case closes, so recent inspections may have none yet. osha_url is OSHA's own page for the inspection; cite it.
@@ -74,6 +74,7 @@ TOOLS = [
          "state": {"type": "string", "description": "Two-letter employer state, like TX"},
          "sector": {"type": "string", "enum": list(q.SECTORS), "description": "NAICS sector key"},
          "since_year": {"type": "integer", "description": "Keep cases whose findings ended in or after this year"},
+         "filed_in": {"type": "integer", "description": "Only employers that filed applications in this fiscal year, like 2024"},
          "visa_violations_only": _VISA_ONLY,
          "min_applications": {"type": "integer", "description": "Only employers with at least this many applications"},
          "sort_by": {"type": "string", "enum": WATCHLIST_SORTS, "description": "Highest first (default back_wages)"},
@@ -119,7 +120,8 @@ TOOLS = [
          "limit": _LIMIT})},
     {"name": "data_overview",
      "description": "Totals for the whole database: employers, applications, employers with linked "
-                    "cases, cases, back wages and penalties, and the OSHA inspections linked to visa employers.",
+                    "cases, cases, back wages and penalties, applications and filing employers per fiscal year, "
+                    "and the OSHA inspections linked to visa employers.",
      "input_schema": _schema({})},
 ]
 
@@ -145,8 +147,8 @@ def get_employer(con, args):
     if not e:
         raise LookupError(f"No employer with id {eid}")
     keep = ("employer_id", "program", "employer_name", "dba", "address", "city", "state", "zip5", "fein",
-            "naics", "visa_classes", "n_applications", "n_certified", "h1b_dependent", "willful_violator",
-            "willful_yes")
+            "naics", "visa_classes", "n_applications", "n_certified", "first_fiscal_year", "last_fiscal_year",
+            "h1b_dependent", "willful_violator", "willful_yes")
     cases = q.cases(con, eid)
     profile = q.employer_profile(con, eid)
     debarred = [{k: d[k] for k in ("program", "entity", "entity_type", "location", "start_date", "end_date",
@@ -156,6 +158,7 @@ def get_employer(con, args):
         "employer": {**{k: e.get(k) for k in keep}, "sector": q.SECTORS.get(q.sector_of(e["naics"]))},
         "totals": {k: (_money(v) if k in ("back_wages", "penalties") else v)
                    for k, v in q.summary(con, eid).items()},
+        "filing_years": q.filing_years(con, eid),
         "cases": [{"case_id": v["case_id"], "whd_name": v["trade_nm"] or v["legal_name"],
                    "whd_city": v["cty_nm"], "whd_state": v["st_cd"],
                    "findings_start": (v["findings_start_date"] or "")[:10],
@@ -234,7 +237,7 @@ def representatives(con, args):
             "overall_visa_violation_rate": {p: round(v, 4) for p, v in q.rep_baselines(con)["visa_violations"].items()}}
 
 
-_APP_KEEP = ("case_number", "case_status", "visa_class", "decision_date", "job_title", "soc_title", "workers",
+_APP_KEEP = ("case_number", "fiscal_year", "case_status", "visa_class", "decision_date", "job_title", "soc_title", "workers",
              "worksite_city", "worksite_state", "wage_from", "wage_to", "wage_unit", "prevailing_wage",
              "pw_unit_of_pay", "pw_wage_level", "lawfirm")
 
@@ -263,7 +266,7 @@ def get_application(con, args):
 
 def watchlist(con, args):
     filters = dict(program=args.get("program"), state=(args.get("state") or "").upper() or None,
-                   sector=args.get("sector"), since_year=args.get("since_year"),
+                   sector=args.get("sector"), since_year=args.get("since_year"), filed_in=args.get("filed_in"),
                    visa_violations_only=bool(args.get("visa_violations_only")),
                    min_applications=int(args.get("min_applications") or 1))
     rows = q.watchlist(con, **filters)
@@ -274,8 +277,8 @@ def watchlist(con, args):
         raise ValueError(f"sort_by must be one of {WATCHLIST_SORTS}")
     rows.sort(key=lambda r: (-(r[key] or 0), r["employer_id"]))
     totals = q.watchlist_totals(con, **filters)
-    keep = ("employer_id", "employer_name", "program", "city", "state", "n_applications", "n_cases",
-            "violations", "visa_violations", "back_wages", "workers", "penalties", "latest_case")
+    keep = ("employer_id", "employer_name", "program", "city", "state", "n_applications", "first_fiscal_year",
+            "last_fiscal_year", "n_cases", "violations", "visa_violations", "back_wages", "workers", "penalties", "latest_case")
     return {"filters": {k: v for k, v in filters.items() if v}, "sorted_by": key,
             "employers": len(rows), "cases": totals["cases"], "back_wages": _money(totals["back_wages"]),
             "penalties": _money(totals["penalties"]),
@@ -327,8 +330,10 @@ def industry_stats(con, args):
 
 
 def data_overview(con, args):
-    t = q.overview(con)["totals"]
-    out = {k: (_money(v) if k in ("back_wages", "penalties") else v) for k, v in t.items()}
+    o = q.overview(con)
+    out = {k: (_money(v) if k in ("back_wages", "penalties") else v) for k, v in o["totals"].items()}
+    out["fiscal_years"] = [{k: y[k] for k in ("fiscal_year", "employers", "applications", "H-1B", "H-2B")}
+                           for y in o["years"]]
     o = q.osha_overview(con)
     if o:
         out["osha"] = {k: (_money(v) if k == "penalties" else v) for k, v in o.items()}
