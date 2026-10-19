@@ -1,5 +1,5 @@
 // Visa Employer Watch: a small hash-routed front end over the JSON API in web/api.py.
-// Routes: #/ (lookup), #/watchlist?filters, #/employer/<id>, #/ask.
+// Routes: #/ (lookup), #/watchlist?filters, #/employer/<id>.
 "use strict";
 
 const app = document.getElementById("app");
@@ -61,13 +61,12 @@ async function route() {
   const ma = path.match(/^\/application\/([A-Za-z0-9-]+)$/);
   let mr;
   try {
-    if (ma) { setActiveNav((state.back.href.match(/^#\/(watchlist|safety|map|industries|ask)/) || [, "search"])[1]); await applicationPage(ma[1]); }
-    else if (m) { setActiveNav((state.back.href.match(/^#\/(watchlist|safety|map|industries|ask)/) || [, "search"])[1]); await employerPage(+m[1]); }
+    if (ma) { setActiveNav((state.back.href.match(/^#\/(watchlist|safety|map|industries)/) || [, "search"])[1]); await applicationPage(ma[1]); }
+    else if (m) { setActiveNav((state.back.href.match(/^#\/(watchlist|safety|map|industries)/) || [, "search"])[1]); await employerPage(+m[1]); }
     else if (path === "/watchlist") { setActiveNav("watchlist"); await watchlistPage(params); }
     else if (path === "/safety") { setActiveNav("safety"); await safetyPage(params); }
     else if (path === "/map") { setActiveNav("map"); await mapPage(params); }
     else if (path === "/industries") { setActiveNav("industries"); await industriesPage(params); }
-    else if (path === "/ask") { setActiveNav("ask"); await askPage(); }
     else if (path === "/debarments") { setActiveNav(""); await debarmentsPage(params); }
     else if (path === "/representatives") { setActiveNav(""); await representativesPage(params); }
     else if ((mr = path.match(/^\/representative\/(firm|person)\/(.+)$/))) { setActiveNav(""); await representativePage(mr[1], decodeURIComponent(mr[2])); }
@@ -84,7 +83,7 @@ document.addEventListener("click", (e) => {
     if (path.startsWith("/representative/")) {
       state.back = { href: location.hash, label: document.querySelector(".emp-head h1")?.textContent || "Law firm or agent" };
     } else if (!path.startsWith("/employer") && !path.startsWith("/application")) {
-      const labels = { "/watchlist": "Watchlist", "/safety": "Safety", "/map": "Map", "/industries": "Industries", "/ask": "Ask",
+      const labels = { "/watchlist": "Watchlist", "/safety": "Safety", "/map": "Map", "/industries": "Industries",
                        "/debarments": "Debarments", "/representatives": "Law firms and agents" };
       state.back = { href: location.hash || "#/", label: labels[path] || "Employer lookup" };
     }
@@ -1168,196 +1167,6 @@ async function industriesPage(params) {
       ["Back wages", money(d.back_wages)], ["Penalties", money(d.penalties)], ["Visa-program violations", n(d.visa_violations)],
     ]) + `<div class="tip-hint">Click to see these employers</div>`;
   });
-}
-
-// ---------- ask ----------
-// Questions go to POST /api/ask, which streams one JSON line per lookup and then the answer.
-const chat = { turns: [], busy: false };
-const EXAMPLES = [
-  "Which H-2B employers in Texas have the most back wages in their Wage and Hour cases?",
-  "Did Cognizant have any H-1B violations? In which cases?",
-  "Which industries have the highest share of visa employers with a Wage and Hour case?",
-  "Is Tata Consultancy Services in Rockville a willful violator?",
-];
-
-// A tool call in plain words, for the "what I looked up" list.
-function lookupText(c) {
-  const a = c.input || {};
-  const filters = [a.program, a.state, a.sector && (state.meta?.sectors?.[a.sector] || a.sector),
-    a.since_year && `cases since ${a.since_year}`, a.visa_violations_only && "visa-program violations only",
-    a.min_applications > 1 && `${a.min_applications}+ applications`,
-    a.sort_by && `by ${a.sort_by.replace(/_/g, " ")}`].filter(Boolean);
-  const f = filters.length ? ` <span class="muted">· ${esc(filters.join(" · "))}</span>` : "";
-  switch (c.name) {
-    case "search_employers": return `Searched employers for “${esc(a.query)}”`;
-    case "get_employer": return `Opened <a href="#/employer/${+a.employer_id}" data-employer>employer ${+a.employer_id}</a>`;
-    case "list_applications": return `Listed applications of <a href="#/employer/${+a.employer_id}" data-employer>employer ${+a.employer_id}</a>`;
-    case "get_application": return `Opened application <a href="#/application/${encodeURIComponent(a.case_number)}">${esc(a.case_number)}</a>`;
-    case "watchlist": return `Ranked employers with Wage and Hour cases${f}`;
-    case "state_stats": return `Compared states${f}`;
-    case "industry_stats": return `Compared industries${f}`;
-    case "data_overview": return "Checked the database totals";
-    case "representatives": return a.key ? `Listed the clients of ${esc(a.key)}` : `Ranked ${a.kind === "person" ? "attorneys and agents" : "law firms and agents"}${a.query ? ` matching “${esc(a.query)}”` : ""}`;
-    default: return esc(c.name);
-  }
-}
-
-// A small, safe Markdown renderer for answers: paragraphs, headings, lists, tables, bold, code and links.
-// Everything is escaped first; links are kept only when they point at this site or an https page.
-function inlineMd(s) {
-  return esc(s)
-    .replace(/`([^`]+)`/g, "<code>$1</code>")
-    .replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>")
-    .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (m, label, url) => {
-      const local = url.match(/^https?:\/\/[^/]+\/(#\/.*)$/);
-      if (local) url = local[1];
-      else if (!/^(https:\/\/|#\/)/.test(url)) return label;
-      const cite = /^(employer|WHD case|application) /.test(label);
-      return `<a href="${url}"${url.startsWith("#/employer/") ? " data-employer" : ""}${cite ? ' class="cite"' : ""}>${label}</a>`;
-    })
-    .replace(/ \(unverified\)/g, ' <span class="badge warn">unverified</span>');
-}
-function md(src) {
-  const out = [], lines = String(src || "").split("\n");
-  for (let i = 0; i < lines.length;) {
-    const line = lines[i];
-    if (!line.trim()) { i++; continue; }
-    if (/^\s*\|/.test(line)) {
-      const rows = [];
-      while (i < lines.length && /^\s*\|/.test(lines[i])) rows.push(lines[i++]);
-      const cells = (r) => r.trim().replace(/^\||\|$/g, "").split("|").map((c) => c.trim());
-      const body = rows.filter((r, k) => k > 0 && !/^[\s|:-]+$/.test(r)).map(cells);
-      const num = (c) => /^[$\d][\d,.$%KMB\s-]*$/.test(c);
-      out.push(`<div class="table-wrap md-table"><table class="mini"><thead><tr>${cells(rows[0]).map((c) => `<th>${inlineMd(c)}</th>`).join("")}</tr></thead><tbody>` +
-        body.map((r) => `<tr>${r.map((c) => `<td${num(c) ? ' class="num"' : ""}>${inlineMd(c)}</td>`).join("")}</tr>`).join("") + "</tbody></table></div>");
-      continue;
-    }
-    const h = line.match(/^#{1,4}\s+(.*)/);
-    if (h) { out.push(`<h4>${inlineMd(h[1])}</h4>`); i++; continue; }
-    if (/^\s*([-*]|\d+\.)\s+/.test(line)) {
-      const ordered = /^\s*\d+\./.test(line), items = [];
-      while (i < lines.length && /^\s*([-*]|\d+\.)\s+/.test(lines[i])) items.push(lines[i++].replace(/^\s*([-*]|\d+\.)\s+/, ""));
-      const tag = ordered ? "ol" : "ul";
-      out.push(`<${tag}>${items.map((x) => `<li>${inlineMd(x)}</li>`).join("")}</${tag}>`);
-      continue;
-    }
-    const para = [];
-    while (i < lines.length && lines[i].trim() && !/^\s*(\||#{1,4}\s|[-*]\s|\d+\.\s)/.test(lines[i])) para.push(lines[i++]);
-    out.push(`<p>${inlineMd(para.join(" "))}</p>`);
-  }
-  return out.join("");
-}
-
-function turnHtml(t, k) {
-  const steps = t.calls.map((c) => `<li${c.error ? ' class="err"' : ""}>${lookupText(c)}${c.error ? ' <span class="muted">· no result</span>' : ""}</li>`).join("");
-  return `
-    <div class="turn">
-      <div class="q"><span>${esc(t.question)}</span></div>
-      <div class="card a">
-        ${t.answer == null && !t.error ? `<div class="thinking"><div class="spinner"></div>${t.calls.length ? "Looking things up…" : "Reading the question…"}</div>
-          ${steps ? `<ol class="steps live">${steps}</ol>` : ""}` : ""}
-        ${t.error ? `<div class="callout">${icon.info}<div>${esc(t.error)}</div></div>` : ""}
-        ${t.answer != null ? `<div class="md">${md(t.answer)}</div>` : ""}
-        ${t.answer != null && t.calls.length ? `<details class="looked"><summary>${icon.chev}What I looked up <span class="muted">(${t.calls.length})</span></summary><ol class="steps">${steps}</ol></details>` : ""}
-      </div>
-    </div>`;
-}
-
-function renderChat() {
-  const box = document.getElementById("chat");
-  if (!box) return;
-  box.innerHTML = chat.turns.map(turnHtml).join("");
-  document.getElementById("ask-start").hidden = chat.turns.length > 0;
-  document.getElementById("ask-new").hidden = !chat.turns.length || chat.busy;
-  const btn = document.getElementById("ask-go");
-  if (btn) btn.disabled = chat.busy || !chat.enabled;
-}
-
-async function ask(question) {
-  question = question.trim();
-  if (!question || chat.busy) return;
-  const history = chat.turns.filter((t) => t.raw).slice(-3).flatMap((t) => [
-    { role: "user", content: t.question }, { role: "assistant", content: t.raw }]);
-  const turn = { question, calls: [], answer: null, raw: null, error: null };
-  chat.turns.push(turn);
-  chat.busy = true;
-  renderChat();
-  document.querySelector(".turn:last-child")?.scrollIntoView({ behavior: "smooth", block: "start" });
-  try {
-    const r = await fetch("/api/ask", { method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ question, history }) });
-    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
-    const reader = r.body.getReader(), dec = new TextDecoder();
-    let buf = "";
-    for (;;) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buf += dec.decode(value, { stream: true });
-      let nl;
-      while ((nl = buf.indexOf("\n")) >= 0) {
-        const ev = JSON.parse(buf.slice(0, nl));
-        buf = buf.slice(nl + 1);
-        if (ev.type === "tool") turn.calls.push(ev);
-        else if (ev.type === "answer") { turn.answer = ev.answer; turn.raw = ev.raw; turn.calls = ev.tool_calls; }
-        else if (ev.type === "error") turn.error = ev.message;
-        renderChat();
-      }
-    }
-    if (turn.answer == null && !turn.error) turn.error = "The answer was interrupted. Please try again.";
-  } catch (err) {
-    turn.error = err.message;
-  }
-  chat.busy = false;
-  renderChat();
-}
-
-async function askPage() {
-  app.innerHTML = `
-    <section class="hero">
-      <div class="eyebrow">Ask the data · answered by Claude from this database</div>
-      <h1 class="page-title">Ask a question</h1>
-      <p class="lede">Ask in plain English about the 80,950 visa employers, their FY2025 applications and the Wage and Hour cases
-        linked to them. Claude answers only from this database, using the same lookups as the rest of the site, and links
-        every employer, case and application it mentions so you can check it.</p>
-    </section>
-    <div id="chat" class="chat"></div>
-    <form class="card composer" id="ask-form">
-      <textarea id="ask-q" rows="2" maxlength="600" placeholder="For example: which H-2B employers in Florida had the most back wages?"></textarea>
-      <div class="composer-bar">
-        <span class="muted small" id="ask-state"></span>
-        <span class="spacer"></span>
-        <button type="button" class="btn" id="ask-new" hidden>New conversation</button>
-        <button type="submit" class="btn primary" id="ask-go" disabled>Ask</button>
-      </div>
-    </form>
-    <div id="ask-start">
-      <div class="eyebrow start-h">Try asking</div>
-      <div class="examples">${EXAMPLES.map((x) => `<button type="button" class="card example">${esc(x)}</button>`).join("")}</div>
-      <div class="card panel how">
-        <h3>How answers work</h3>
-        <ul>
-          <li><b>From the database only.</b> Claude looks records up with the site's own searches and rankings, then writes the answer. It doesn't use outside knowledge about companies.</li>
-          <li><b>Every record is linked.</b> Each employer, Wage and Hour case and application in an answer links to its page here. A citation that no lookup returned is marked <span class="badge warn">unverified</span>.</li>
-          <li><b>Check before you rely on it.</b> Cases are linked to employers by name and address, and about 3 to 4% of links are wrong. Answers can also misread a record, so open the linked page for anything important.</li>
-        </ul>
-      </div>
-    </div>`;
-  const input = document.getElementById("ask-q");
-  const send = () => { const v = input.value; input.value = ""; ask(v); };
-  document.getElementById("ask-form").addEventListener("submit", (e) => { e.preventDefault(); send(); });
-  input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } });
-  document.querySelectorAll(".example").forEach((b) => b.addEventListener("click", () => ask(b.textContent)));
-  document.getElementById("ask-new").addEventListener("click", () => { chat.turns = []; renderChat(); input.focus(); });
-  renderChat();
-  input.focus();
-  const s = await api("/ask").catch(() => ({ enabled: false, reason: "offline" }));
-  chat.enabled = s.enabled;
-  const label = document.getElementById("ask-state");
-  if (!label) return;
-  label.innerHTML = s.enabled ? "Open to everyone · Enter to send, Shift+Enter for a new line"
-    : s.reason === "daily_limit" ? '<span class="badge warn">Today\'s question budget is used up. It resets at midnight UTC.</span>'
-    : '<span class="badge warn">Questions aren\'t switched on for this server yet.</span>';
-  renderChat();
 }
 
 route();

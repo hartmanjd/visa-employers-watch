@@ -35,10 +35,6 @@ Settings (environment variables, all optional):
 | RESEARCH_DB | Path of the database to use instead of `h1b-data/research.db` |
 | RESEARCH_DB_URL | Where to download the gzipped database from instead of the release |
 | RESEARCH_DB_SHA256 | Checksum of the file at RESEARCH_DB_URL |
-| ANTHROPIC_API_KEY | Turns on the Ask page (see [Ask page](#ask-page)) |
-| CHAT_DAILY_CAP_USD | Most the Ask page may spend on the API per day, in US dollars (default 3) |
-| CHAT_PER_MINUTE, CHAT_PER_DAY | Questions one visitor may ask per minute and per day (defaults 5 and 40) |
-| CHAT_SPEND_FILE | Where today's spending is saved (default `/tmp/visa-chat-spend.json`) |
 
 ## Pages
 
@@ -54,7 +50,6 @@ Settings (environment variables, all optional):
 | `#/representative/<kind>/<key>` | One firm or person: totals, spellings, tax IDs and every client employer with its WHD record. Employer pages link here from a "Who else their representatives file for" panel |
 | `#/debarments` | DOL's published debarment lists (H-1B, H-2A, H-2B, permanent labor certification), each entry with its period, status and reason, and the FY2025 visa filers that match it by name (and state when DOL gives one) |
 | `#/industries` | NAICS sectors: a size-against-rate bubble chart, bars for share with a case and back wages, and a table |
-| `#/ask` | Ask a question in plain English. Claude answers from the database with the lookups in `chat/`, shows each lookup as it runs, and links every employer, WHD case and application it cites. Follow-up questions keep the last three questions and answers |
 
 On the Map and Industries pages, hovering a state or industry shows its numbers, and clicking it opens
 the Watchlist filtered to it.
@@ -86,8 +81,6 @@ that lists the MCP address, its tools, what the data means and which pages to ci
 | `GET /api/debarments.csv` | Every DOL debarment entry as CSV, with the IDs of matching employers |
 | `GET /api/meta` | States, NAICS sector names and the source files behind the database |
 | `POST /mcp` | The chat's ten lookups as a read-only MCP server (see `chat/README.md` for connecting Claude Desktop) |
-| `GET /api/ask` | Whether the Ask page can take questions (`enabled`, or the `reason` it can't) |
-| `POST /api/ask` | Body `{"question", "history"}`. Streams JSON lines: one `tool` line as each lookup starts, then one `answer` line (linked answer, raw text, citations, lookups) or an `error` line. Returns 429 when the visitor is over their limit and 503 when the daily budget is used up |
 
 FastAPI also serves interactive API docs at http://localhost:8000/docs.
 
@@ -112,34 +105,17 @@ rebuilds. To set it up:
    `hartmanjd/visa-employer-watch`.
 4. Run **Actions > Deploy to Hugging Face Space > Run workflow** once, or merge to `main`.
 
-Links in the site, `llms.txt`, CSV downloads and the chat use the Space's own address, which Hugging
-Face passes in as `SPACE_HOST`; set `SITE_URL` to override it. For the Ask page, add `ANTHROPIC_API_KEY`
-as a secret in the Space's **Settings > Variables and secrets**.
-
-## Ask page
-
-The Ask page stays switched off until the server has an Anthropic API key. To switch it on in Render:
-
-1. Create a key just for this site at https://platform.claude.com under **API keys**, and set a monthly
-   spend limit under **Billing** as a backstop.
-2. In the Render dashboard, open the **visa-employer-watch** service, then **Environment**.
-3. Click **Add Environment Variable**, enter `ANTHROPIC_API_KEY` as the key and paste the API key as the
-   value, then **Save Changes**. Render redeploys the site with the key.
-
-The key lives only in Render's settings, never in the repo. Spending is capped at `CHAT_DAILY_CAP_USD`
-per day for all visitors together; each question holds back $0.02 while it runs and is then charged its
-real cost (usually under $0.002). The day's total is saved to a file, which a redeploy clears, so the
-monthly limit on the key is the hard ceiling.
+Links in the site, `llms.txt`, CSV downloads and the MCP server use the Space's own address, which Hugging
+Face passes in as `SPACE_HOST`; set `SITE_URL` to override it.
 
 ## Files
 
 | File | What it is |
 | --- | --- |
-| api.py | The API and static file server; reuses the lookups in `dashboard/queries.py` and the chat engine in `chat/` |
+| api.py | The API and static file server; reuses the lookups in `dashboard/queries.py` and serves the MCP server in `chat/` |
 | static/index.html | Page shell: top bar, navigation, fonts |
 | static/styles.css | Design: colors (light and dark), type, cards, tables, filters |
 | static/app.js | Routing, the seven views and their charts, fetching from the API |
 | tests/test_api.py | API tests on a small made-up database |
-| tests/test_ask.py | Ask endpoint and limit tests, with a scripted stand-in for the model |
 
 Run the tests from the repo root with `python3 -m unittest discover web/tests`.
