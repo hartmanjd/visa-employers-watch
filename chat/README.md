@@ -51,14 +51,13 @@ Claude plan pays for the conversation, and the site does no writing of any kind.
 3. Click **Add custom connector**.
 4. Give it a name, such as `Visa Employer Watch`, and paste this URL:
 
-        https://visa-employer-watch.onrender.com/mcp
+        https://catgat-h-program.hf.space/mcp
 
 5. Click **Add**. There is no sign-in step, because the server is public and read-only.
 6. Start a new chat and ask, for example, "Using Visa Employer Watch, which H-2B employers in Texas have
    the most back wages?" Claude asks permission the first time it uses each lookup.
 
-Custom connectors work on every Claude plan. A free account can add one. The free Render plan sleeps after
-about 15 idle minutes, so the first lookup after a quiet spell can take up to a minute while the site wakes.
+Custom connectors work on every Claude plan. A free account can add one.
 
 To try a local copy instead, start the site (see `web/README.md`) and point an MCP client at
 `http://localhost:8000/mcp`. Claude Desktop's custom connectors need a public https address, so a local
