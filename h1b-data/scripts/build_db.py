@@ -2,10 +2,12 @@
 
 Tables:
   sources          one row per input file, from its manifest (checksum, rows, URLs)
-  employers        one row per employer per program (H-1B or H-2B)
+  employers        one row per employer per program (H-1B or H-2B), with the first
+                   and latest fiscal year it filed in
   applications     one row per visa application: its DOL case number and every
                    column of the public disclosure file (H-2B-only columns are
-                   blank on H-1B rows and the other way round)
+                   blank on H-1B rows and the other way round) and its fiscal year
+  employer_years   applications and certifications per employer and fiscal year
   violation_cases  one row per WHD enforcement case
   matches          links a WHD case to an employer: how it was matched and the
                    rule's false-match rate on the tax-ID benchmark
@@ -70,8 +72,8 @@ CREATE TABLE employers (
   employer_name TEXT, dba TEXT, name_raw TEXT, dba_clean TEXT, city TEXT, address TEXT,
   address2 TEXT, postal_code TEXT, phone TEXT, phone_ext TEXT,
   fein TEXT, naics TEXT, visa_classes TEXT, n_applications INTEGER, n_certified INTEGER,
-  h1b_dependent INTEGER, willful_violator INTEGER, source_files TEXT,
-  source_id INTEGER REFERENCES sources);
+  h1b_dependent INTEGER, willful_violator INTEGER, first_fiscal_year INTEGER, last_fiscal_year INTEGER,
+  source_files TEXT, source_id INTEGER REFERENCES sources);
 {violation_cases}
 CREATE TABLE matches (
   case_id INTEGER REFERENCES violation_cases, employer_id INTEGER REFERENCES employers,
@@ -82,10 +84,10 @@ CREATE INDEX employers_name ON employers(name_clean, state);
 CREATE INDEX matches_employer ON matches(employer_id);
 """.format(violation_cases="CREATE TABLE violation_cases (\n  " + ",\n  ".join(
     f"{c} {_whd_type(c)}" for c in WHD_FIELDS) + ",\n  source_id INTEGER REFERENCES sources);")
-INT_COLS = ["n_applications", "n_certified"] + WHD_INT_COLS
+INT_COLS = ["n_applications", "n_certified", "first_fiscal_year", "last_fiscal_year"] + WHD_INT_COLS
 REAL_COLS = WHD_REAL_COLS
 # Disclosure columns stored as numbers, so wages and worker counts can be compared and summed.
-APP_INT_COLS = ["total_worker_positions", "new_employment", "continued_employment",
+APP_INT_COLS = ["fiscal_year", "total_worker_positions", "new_employment", "continued_employment",
                 "change_previous_employment", "new_concurrent_employment", "change_employer",
                 "amended_petition", "worksite_workers", "total_worksite_locations",
                 "cap_subject_workers", "cap_exempt_workers", "total_workers_requested",
@@ -134,6 +136,18 @@ def numeric(df, int_cols=INT_COLS, real_cols=REAL_COLS):
     return df
 
 
+# Applications per employer and fiscal year, certified ones counted like build_filers.py does.
+EMPLOYER_YEARS_SQL = """
+CREATE TABLE employer_years AS
+  SELECT employer_id, fiscal_year, COUNT(*) AS applications,
+         SUM(UPPER(case_status) LIKE 'CERTIFIED%' OR UPPER(case_status) LIKE '%CERTIFICATION%') AS certified
+  FROM applications WHERE fiscal_year IS NOT NULL GROUP BY employer_id, fiscal_year;
+CREATE INDEX employer_years_employer ON employer_years(employer_id);
+CREATE INDEX employer_years_year ON employer_years(fiscal_year, employer_id);
+"""
+APP_CHUNK = 200_000
+
+
 def load_program(con, program, filers_path, next_id):
     emp = read(filers_path)
     emp.insert(0, "employer_id", range(next_id, next_id + len(emp)))
@@ -142,30 +156,39 @@ def load_program(con, program, filers_path, next_id):
         emp[c] = (emp[c] == "True").astype(int)
     emp["source_id"] = add_source(con, filers_path)
     numeric(emp).to_sql("employers", con, if_exists="append", index=False)
+    return emp, add_source(con, applications_path(filers_path))
 
+
+def app_chunks(program, filers_path, emp, source_id):
+    """The program's applications in chunks, each with its employer_id, so many years of
+    filings never sit in memory at once."""
     app_path = applications_path(filers_path)
-    apps = read(app_path).merge(emp[["employer_id", "name_clean", "state", "zip5"]],
-                                on=["name_clean", "state", "zip5"], how="left")
-    if apps.employer_id.isna().any():
-        raise ValueError(f"{os.path.basename(app_path)} has applications with no employer row")
-    apps["program"] = program
-    apps["source_id"] = add_source(con, app_path)
-    apps["employer_id"] = apps.employer_id.astype(int)
-    rest = [c for c in apps.columns if c not in APP_FIRST and c not in ("name_clean", "state", "zip5")]
-    return emp, apps[APP_FIRST + rest]
+    keys = emp[["employer_id", "name_clean", "state", "zip5"]]
+    for apps in pd.read_csv(app_path, dtype=str, keep_default_na=False, chunksize=APP_CHUNK):
+        apps = apps.merge(keys, on=["name_clean", "state", "zip5"], how="left")
+        if apps.employer_id.isna().any():
+            raise ValueError(f"{os.path.basename(app_path)} has applications with no employer row")
+        apps["program"] = program
+        apps["source_id"] = source_id
+        apps["employer_id"] = apps.employer_id.astype(int)
+        yield apps.drop(columns=["name_clean", "state", "zip5"])
 
 
-def load_applications(con, frames):
+def load_applications(con, programs):
     """One applications table for both programs; columns one program lacks stay empty."""
-    cols = list(dict.fromkeys([c for f in frames for c in f.columns] + APP_REQUIRED))
+    header = [c for _, path, _, _ in programs for c in pd.read_csv(applications_path(path), nrows=0).columns
+              if c not in ("name_clean", "state", "zip5")]
+    cols = list(dict.fromkeys(APP_FIRST + header + APP_REQUIRED))
     # Text unless listed as a number, so ZIPs, phones and codes keep their leading zeros.
     types = {c: "INTEGER" if c in APP_INT_COLS + ["employer_id", "source_id"] else
              "REAL" if c in APP_REAL_COLS else "TEXT" for c in cols}
-    for f in frames:  # one at a time, to keep memory down
-        numeric(f.reindex(columns=cols), APP_INT_COLS, APP_REAL_COLS).to_sql(
-            "applications", con, if_exists="append", index=False, dtype=types)
+    for program, path, emp, source_id in programs:
+        for chunk in app_chunks(program, path, emp, source_id):
+            numeric(chunk.reindex(columns=cols), APP_INT_COLS, APP_REAL_COLS).to_sql(
+                "applications", con, if_exists="append", index=False, dtype=types)
     con.execute("CREATE INDEX applications_employer ON applications(employer_id)")
     con.execute("CREATE UNIQUE INDEX applications_case ON applications(case_number)")
+    con.executescript(EMPLOYER_YEARS_SQL)
 
 
 def whd_keys(whd):
@@ -326,9 +349,9 @@ def build(out, lca, h2b, whd_path, bench, osha_dir=None, osha_since="2004-01-01"
         os.remove(out)
     con = sqlite3.connect(out)
     con.executescript(SCHEMA)
-    lca_emp, lca_apps = load_program(con, "H-1B", lca, 1)
-    h2b_emp, h2b_apps = load_program(con, "H-2B", h2b, len(lca_emp) + 1)
-    load_applications(con, [lca_apps, h2b_apps])
+    lca_emp, lca_src = load_program(con, "H-1B", lca, 1)
+    h2b_emp, h2b_src = load_program(con, "H-2B", h2b, len(lca_emp) + 1)
+    load_applications(con, [("H-1B", lca, lca_emp, lca_src), ("H-2B", h2b, h2b_emp, h2b_src)])
     emp = pd.concat([lca_emp, h2b_emp])
 
     whd = read(whd_path).reindex(columns=WHD_FIELDS)  # an older, narrower download leaves columns empty

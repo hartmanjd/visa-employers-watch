@@ -31,8 +31,8 @@ DEBARMENTS_CSV = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", 
 
 # A gzipped copy of research.db published as a GitHub release asset, for hosts (like Render)
 # that only have the git checkout. The checksum is of the .gz file at that URL.
-DB_URL = "https://github.com/hartmanjd/visa-employers-watch/releases/download/data-2026-10-18/research.db.gz"
-DB_SHA256 = "89939f5a353fb16e8a40365dd8fd9ad6f8bdee57f08efefef44cde4ea34259b9"
+DB_URL = "https://github.com/hartmanjd/visa-employers-watch/releases/download/data-2026-10-19/research.db.gz"
+DB_SHA256 = "06d7759d01505731ddfcafd736e26d6ad00853fd851ef93395df4a7aae422546"
 
 
 def connect(path=None):
@@ -47,18 +47,20 @@ def connect(path=None):
 
 
 def _older_layout(path):
-    """True for a database that predates the full disclosure columns, the full WHD columns or the OSHA tables."""
+    """True for a database that predates the full disclosure columns, the full WHD columns, the OSHA tables or
+    the fiscal years."""
     try:
         con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
         try:
             cols = {r[1] for r in con.execute("PRAGMA table_info(applications)")}
             whd = {r[1] for r in con.execute("PRAGMA table_info(violation_cases)")}
             osha = con.execute("SELECT 1 FROM sqlite_master WHERE name = 'osha_employer_totals'").fetchone()
+            years = con.execute("SELECT 1 FROM sqlite_master WHERE name = 'employer_years'").fetchone()
         finally:
             con.close()
     except sqlite3.DatabaseError:
         return False
-    return bool(cols) and ("job_title" not in cols or "flsa_cl_violtn_cnt" not in whd or not osha)
+    return bool(cols) and ("job_title" not in cols or "flsa_cl_violtn_cnt" not in whd or not osha or not years)
 
 
 def download_db(path=None, url=None, sha256=None):
@@ -289,7 +291,7 @@ def applications(con, employer_id, limit=None):
     """Visa applications filed by this employer, newest decision first, with the job, worksite,
     offered and prevailing wage, representation and the DOL file each came from."""
     sql = f"""
-        SELECT a.case_number, a.program, a.case_status, a.visa_class, a.decision_date, a.fein,
+        SELECT a.case_number, a.program, a.fiscal_year, a.case_status, a.visa_class, a.decision_date, a.fein,
                a.job_title, a.soc_code, a.soc_title, {_WORKERS} AS workers,
                {_BEGIN} AS begin_date, {_END} AS end_date,
                a.worksite_city, a.worksite_state, {_WAGE_FROM} AS wage_from, {_WAGE_TO} AS wage_to,
@@ -322,7 +324,7 @@ def application(con, case_number):
 # How the application page groups the disclosure columns. A column is shown in the first section
 # whose prefixes or names match it; anything else goes under "Other answers on the form".
 APPLICATION_SECTIONS = [
-    ("Case", ["case_number", "case_status", "visa_class", "received_date", "decision_date",
+    ("Case", ["case_number", "fiscal_year", "case_status", "visa_class", "received_date", "decision_date",
               "original_cert_date", "cap_exempt", "cap_subject_workers", "cap_exempt_workers",
               "nature_of_temporary_need", "public_disclosure"]),
     ("Job", ["job_title", "soc_code", "soc_title", "full_time_position", "begin_date", "end_date",
@@ -496,8 +498,12 @@ def dol_file_url(csv_name, urls):
     return ""
 
 
-def _watchlist_filter(program, since_year, visa_violations_only, min_applications, state, sector=None):
+def _watchlist_filter(program, since_year, visa_violations_only, min_applications, state, sector=None,
+                      filed_in=None):
     where, args = ["e.n_applications >= ?"], [min_applications]
+    if filed_in:
+        where.append("e.employer_id IN (SELECT employer_id FROM employer_years WHERE fiscal_year = ?)")
+        args.append(int(filed_in))
     if sector:
         prefixes = SECTOR_PREFIXES.get(sector)
         if prefixes is None:
@@ -519,20 +525,20 @@ def _watchlist_filter(program, since_year, visa_violations_only, min_application
 
 
 def watchlist(con, program=None, since_year=None, visa_violations_only=False, min_applications=1,
-              state=None, sector=None):
+              state=None, sector=None, filed_in=None):
     """Visa employers with linked WHD cases, one row per employer, most back wages first.
 
     `since_year` keeps cases whose findings end in or after that year. `visa_violations_only` keeps
     cases with violations under the employer's own visa program (H-1B or H-2B). Cases with no
-    findings date are dropped when `since_year` is set. `zip_links` counts the cases linked by
-    name + ZIP, the stricter of the two match rules.
+    findings date are dropped when `since_year` is set. `filed_in` keeps employers that filed in that
+    fiscal year. `zip_links` counts the cases linked by name + ZIP, the stricter of the two match rules.
     """
     where, args = _watchlist_filter(program, since_year, visa_violations_only, min_applications, state,
-                                    sector)
+                                    sector, filed_in)
     return rows(con, f"""
         SELECT e.employer_id, e.employer_name, e.dba, e.city, e.state, e.program, e.naics,
                e.n_applications, e.n_certified, {WILLFUL_COLS}, e.h1b_dependent,
-               COUNT(*) AS n_cases,
+               e.first_fiscal_year, e.last_fiscal_year, COUNT(*) AS n_cases,
                SUM(m.method = 'clean name + ZIP') AS zip_links,
                COALESCE(SUM(v.case_violtn_cnt), 0) AS violations,
                COALESCE(SUM(v.h1b_violtn_cnt), 0) AS h1b_violations,
@@ -552,7 +558,7 @@ def watchlist_case_ids(con, **filters):
     where, args = _watchlist_filter(filters.get("program"), filters.get("since_year"),
                                     filters.get("visa_violations_only", False),
                                     filters.get("min_applications", 1), filters.get("state"),
-                                    filters.get("sector"))
+                                    filters.get("sector"), filters.get("filed_in"))
     out = {}
     for r in rows(con, f"""
             SELECT m.employer_id, v.case_id
@@ -572,7 +578,7 @@ def watchlist_totals(con, **filters):
     where, args = _watchlist_filter(filters.get("program"), filters.get("since_year"),
                                     filters.get("visa_violations_only", False),
                                     filters.get("min_applications", 1), filters.get("state"),
-                                    filters.get("sector"))
+                                    filters.get("sector"), filters.get("filed_in"))
     return rows(con, f"""
         SELECT COUNT(*) AS cases, COALESCE(SUM(bw_atp_amt), 0) AS back_wages,
                COALESCE(SUM(cmp_assd), 0) AS penalties
@@ -595,14 +601,42 @@ def overview(con, top=5, min_sector_employers=100):
                (SELECT COUNT(*) FROM applications) AS applications,
                (SELECT COUNT(DISTINCT employer_id) FROM matches) AS employers_with_cases""")[0]
     totals.update(watchlist_totals(con))
-    visa = watchlist(con, visa_violations_only=True)
+    years = fiscal_years(con)
+    # "Still filing": employers that filed in the latest fiscal year in the data.
+    visa = watchlist(con, visa_violations_only=True, filed_in=years[-1]["fiscal_year"] if years else None)
     for r in visa:
         r["visa_violations"] = r["h1b_violations"] if r["program"] == "H-1B" else r["h2b_violations"]
     visa.sort(key=lambda r: (-r["n_applications"], r["employer_id"]))
     sectors = [r for r in sector_stats(con) if r["employers"] >= min_sector_employers]
     sectors.sort(key=lambda r: -r["share_with_cases"])
-    return {"totals": totals, "top_back_wages": watchlist(con)[:top], "visa_violators": visa[:top],
-            "n_visa_violators": len(visa), "sectors": sectors[:top]}
+    latest = rows(con, "SELECT MAX(decision_date) AS d FROM applications")[0]["d"]
+    return {"totals": totals, "years": years, "latest_decision": (latest or "")[:10] or None, "top_back_wages": watchlist(con)[:top],
+            "visa_violators": visa[:top], "n_visa_violators": len(visa), "sectors": sectors[:top]}
+
+
+def fiscal_years(con):
+    """Applications and filing employers per fiscal year and program, oldest year first."""
+    if not _has_table(con, "employer_years"):
+        return []
+    out = {}
+    for r in rows(con, """
+            SELECT y.fiscal_year, e.program, COUNT(*) AS employers, SUM(y.applications) AS applications
+            FROM employer_years y JOIN employers e USING (employer_id)
+            GROUP BY y.fiscal_year, e.program ORDER BY y.fiscal_year"""):
+        y = out.setdefault(r["fiscal_year"], {"fiscal_year": r["fiscal_year"], "H-1B": 0, "H-2B": 0,
+                                               "employers": 0, "applications": 0})
+        y[r["program"]] = r["applications"]
+        y["employers"] += r["employers"]
+        y["applications"] += r["applications"]
+    return list(out.values())
+
+
+def filing_years(con, employer_id):
+    """This employer's applications and certifications per fiscal year, for the employer page's chart."""
+    if not _has_table(con, "employer_years"):
+        return []
+    return rows(con, """SELECT fiscal_year, applications, certified FROM employer_years
+                        WHERE employer_id = ? ORDER BY fiscal_year""", employer_id)
 
 
 # NAICS sectors (first two digits of the code). Three sectors span several two-digit prefixes.
@@ -708,7 +742,7 @@ def sources(con):
 
 
 # ---------- Red flags ----------
-# Plain, explainable patterns in an employer's own FY2025 applications that are worth a closer look.
+# Plain, explainable patterns in an employer's own applications (every fiscal year in the data) that are worth a closer look.
 # None is evidence of a violation. Each flag needs a minimum number of applications, so a handful of
 # filings cannot trip it, and each is shown next to the same share across all employers in the program.
 
@@ -786,7 +820,7 @@ def _compute_flag_baselines(con):
 
 
 def red_flags(con, employer_id):
-    """The red flags this employer's FY2025 applications trip, each with its counts and the program baseline."""
+    """The red flags this employer's applications trip, each with its counts and the program baseline."""
     e = employer(con, employer_id)
     if not e:
         return []

@@ -337,7 +337,13 @@ details.sources > summary { cursor: pointer; color: var(--ink-2); font-size: 14p
 .avg-mark { position: absolute; top: -3px; bottom: -3px; width: 0; border-left: 2px dashed var(--ink-3); }
 .columns { width: 100%; height: auto; display: block; }
 .columns .bar { fill: var(--series-1); }
-.columns .bar:hover { opacity: .8; }
+.columns .bar:hover, .columns g:hover .bar { opacity: .8; }
+.columns .bar.s2 { fill: var(--series-2); }
+.columns .hit { fill: transparent; }
+.legend .swatch.s1 { background: var(--series-1); }
+.legend .swatch.s2 { background: var(--series-2); }
+.columns .bar.h1b, .legend .swatch.h1b { fill: var(--accent); background: var(--accent); }
+.columns .bar.h2b, .legend .swatch.h2b { fill: var(--violet); background: var(--violet); }
 .columns .axis { font: 11px var(--sans); fill: var(--ink-3); }
 .columns .gridline { stroke: var(--chart-grid); stroke-width: 1; }
 .scatter { width: 100%; height: auto; display: block; }

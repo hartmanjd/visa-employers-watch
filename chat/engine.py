@@ -19,7 +19,7 @@ MAX_TOKENS = 8000
 # and cache reads 0.1x the input price.
 PRICES = {"claude-haiku-5-5": (0.10, 0.50), "claude-sonnet-5-5": (2.00, 10.00), "claude-opus-5-5": (4.00, 20.00)}
 
-SYSTEM = """You answer questions about U.S. employers that filed H-1B or H-2B visa applications in fiscal year 2025, the Department of Labor Wage and Hour Division (WHD) enforcement cases linked to them, and the OSHA safety and health inspections linked to them. People using you include investigators deciding which employers to look at.
+SYSTEM = """You answer questions about U.S. employers that filed H-1B or H-2B visa applications in the fiscal years the data covers, the Department of Labor Wage and Hour Division (WHD) enforcement cases linked to them, and the OSHA safety and health inspections linked to them. People using you include investigators deciding which employers to look at.
 
 Use only what the tools return. Do not use outside knowledge about any company, and do not guess. If the tools cannot answer the question, say that the data doesn't cover it and, when useful, what it does cover.
 

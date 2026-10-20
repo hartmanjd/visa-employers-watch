@@ -99,8 +99,9 @@ function searchPage(params) {
       <div class="hero-text">
       <div class="eyebrow">H-1B and H-2B employers · Wage and Hour enforcement</div>
       <h1 class="page-title">Look up an employer</h1>
-      <p class="lede">Search 80,950 employers that filed H-1B or H-2B applications in FY2025 by name, trade name or tax ID,
-        or open one of their 612,374 applications by its DOL case number. See the jobs, worksites, wages and representatives
+      <p class="lede">Search the <span id="lede-employers">80,000+</span> employers that filed H-1B or H-2B applications in
+        <span id="lede-years">recent fiscal years</span> by name, trade name or tax ID, or open one of their
+        <span id="lede-apps">applications</span> by its DOL case number. See the jobs, worksites, wages and representatives
         on their filings and the Department of Labor Wage and Hour cases linked to them. Every figure traces back to its DOL record.</p>
       <div class="searchbox">${icon.search}
         <input id="q" type="search" placeholder="Company name, trade name, tax ID or DOL case number" autocomplete="off" value="${esc(q)}">
@@ -151,16 +152,26 @@ async function homeOverview() {
     return `<b>${esc(STATE_NAMES[st] || st)}</b>` + (d ? tipRows([["Visa employers", n(d.employers)], ["Linked cases", n(d.cases)],
       ["Cases per 100", d.cases_per_100.toFixed(1)], ["Back wages", compactMoney(d.back_wages)]]) : '<div class="tip-hint">No visa employers in the data.</div>');
   });
-  const t = o.totals;
+  const t = o.totals, span = fyRange(o.years);
+  const fill = (id, text) => { const el = document.getElementById(id); if (el) el.textContent = text; };
+  fill("lede-employers", n(t.employers));
+  fill("lede-years", span);
+  fill("lede-apps", n(t.applications) + " applications");
+  const latest = o.years.length ? o.years[o.years.length - 1].fiscal_year : null;
   const maxWage = Math.max(...o.top_back_wages.map((r) => r.back_wages), 1);
   const maxShare = Math.max(...o.sectors.map((r) => r.share_with_cases), 0.01);
   box.innerHTML = `
     <div class="tiles home-tiles">
-      <div class="card tile"><div class="label">Visa employers</div><div class="value">${n(t.employers)}</div><div class="sub">filed in FY2025</div></div>
-      <div class="card tile"><div class="label">Applications</div><div class="value">${n(t.applications)}</div><div class="sub">H-1B and H-2B, FY2025</div></div>
+      <div class="card tile"><div class="label">Visa employers</div><div class="value">${n(t.employers)}</div><div class="sub">filed in ${esc(span)}</div></div>
+      <div class="card tile"><div class="label">Applications</div><div class="value">${n(t.applications)}</div><div class="sub">H-1B and H-2B, ${esc(span)}</div></div>
       <div class="card tile"><div class="label">Employers with WHD cases</div><div class="value">${n(t.employers_with_cases)}</div><div class="sub">${pct(t.employers_with_cases / t.employers)} of employers, ${n(t.cases)} cases</div></div>
       <div class="card tile"><div class="label">Back wages found</div><div class="value good-num">${compactMoney(t.back_wages)}</div><div class="sub">plus <span class="bad-text">${compactMoney(t.penalties)}</span> in penalties</div></div>
     </div>
+    ${o.years.length > 1 ? `<div class="card panel" style="margin-top:16px" id="home-years"><h3>Applications by fiscal year</h3>
+      <div class="sub">DOL disclosure files, one count per case number. A federal fiscal year runs October to September${o.latest_decision
+        ? `; the latest file has decisions through ${day(o.latest_decision)}, so FY${latest} may not be complete` : ""}.
+        Hover a column for its numbers.</div>
+      ${fyColumns(o.years, [["H-1B", "H-1B", "h1b"], ["H-2B", "H-2B", "h2b"]], "Applications per fiscal year")}</div>` : ""}
     <div class="eyebrow start-h">Where to start</div>
     <div class="grid-3">
       <div class="card panel start">
@@ -175,12 +186,12 @@ async function homeOverview() {
       </div>
       <div class="card panel start">
         <h3>Visa violators still filing</h3>
-        <div class="sub">${n(o.n_visa_violators)} employers had WHD cases that found violations of their own visa program, and still filed in FY2025. Most applications first.</div>
+        <div class="sub">${n(o.n_visa_violators)} employers had WHD cases that found violations of their own visa program, and filed again in FY${esc(latest)}, the latest year in the data. Most applications first.</div>
         <div class="start-rows">${o.visa_violators.map((r) => `
           <a class="start-row" href="#/employer/${r.employer_id}" data-employer>
             <span class="who"><span class="nm">${esc(r.employer_name)}</span><span class="wh">${esc(titleCase(r.city))}, ${esc(r.state)} · ${n(r.visa_violations)} ${esc(r.program)} violation${r.visa_violations === 1 ? "" : "s"}</span></span>
             <span class="v">${n(r.n_applications)}<small>apps</small></span></a>`).join("")}</div>
-        <a class="more" href="#/watchlist?visa_only=1&sort=n_applications">All visa violators →</a>
+        <a class="more" href="#/watchlist?visa_only=1&sort=n_applications${latest ? "&filed=" + latest : ""}">All visa violators →</a>
       </div>
       <div class="card panel start">
         <h3>Industries with the most cases</h3>
@@ -193,6 +204,44 @@ async function homeOverview() {
         <a class="more" href="#/industries">All industries →</a>
       </div>
     </div>`;
+  const yearsBox = document.getElementById("home-years");
+  if (yearsBox) bindTips(yearsBox, (i) => { const r = o.years[i]; return `<b>FY${r.fiscal_year}</b>` + tipRows([["H-1B", n(r["H-1B"])],
+    ["H-2B", n(r["H-2B"])], ["All applications", n(r.applications)], ["Employers filing", n(r.employers)]]); });
+}
+
+// "FY2020–FY2026" for a list of {fiscal_year} rows.
+function fyRange(years) {
+  if (!years || !years.length) return "the fiscal years in the data";
+  const a = years[0].fiscal_year, b = years[years.length - 1].fiscal_year;
+  return a === b ? `FY${a}` : `FY${a}–FY${b}`;
+}
+
+// Stacked columns, one per fiscal year. series: [[key, label, class], ...], bottom first.
+function fyColumns(rows, series, label) {
+  const W = 1100, H = 170, L = 72, B = 22, T = 8;
+  const total = (r) => series.reduce((sum, [k]) => sum + (r[k] || 0), 0);
+  const max = niceMax(Math.max(...rows.map(total)));
+  const bw = (W - L) / rows.length, gap = Math.min(28, bw * 0.3);
+  const y = (v) => T + (H - T - B) * (1 - v / max);
+  const cols = rows.map((r, i) => {
+    const x = L + i * bw + gap / 2, w = bw - gap;
+    let base = 0;
+    const parts = series.map(([k, , cls], j) => {
+      const v = r[k] || 0;
+      if (!v) return "";
+      const top = base + v, onTop = series.slice(j + 1).every(([kk]) => !r[kk]);
+      const d = onTop ? roundTop(x, y(top), w, y(base) - y(top), 4) : `M${x},${y(base)}V${y(top)}H${x + w}V${y(base)}Z`;
+      base = top;
+      return `<path class="bar ${cls}" d="${d}"/>`;
+    }).join("");
+    return `<g data-tip="${i}"><rect class="hit" x="${L + i * bw}" y="${T}" width="${bw}" height="${H - T - B}"/>${parts}</g>`;
+  }).join("");
+  return `<svg class="columns" viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(label)}">
+    ${[0, max / 2, max].map((t) => `<line class="gridline" x1="${L}" x2="${W}" y1="${y(t)}" y2="${y(t)}"/><text class="axis" x="${L - 6}" y="${y(t) + 4}" text-anchor="end">${n(t)}</text>`).join("")}
+    ${cols}
+    ${rows.map((r, i) => `<text class="axis" x="${L + i * bw + bw / 2}" y="${H - 6}" text-anchor="middle">FY${r.fiscal_year}</text>`).join("")}
+  </svg>
+  <div class="legend">${series.map(([, name, cls]) => `<span><i class="swatch ${cls || "s1"}"></i>${esc(name)}</span>`).join("")}</div>`;
 }
 
 function miniMap(states) {
@@ -227,6 +276,13 @@ async function employerPage(id) {
   loading("Loading employer…");
   const d = await api("/employers/" + id);
   const e = d.employer, s = d.summary;
+  const fyears = [];
+  if (d.filing_years.length) {
+    for (let y = d.filing_years[0].fiscal_year; y <= d.filing_years[d.filing_years.length - 1].fiscal_year; y++) {
+      const r = d.filing_years.find((f) => f.fiscal_year === y) || { fiscal_year: y, applications: 0, certified: 0 };
+      fyears.push({ ...r, other: r.applications - r.certified });
+    }
+  }
   const flags = [
     programBadge(e.program),
     d.debarments.length ? `<a class="badge bad" href="#emp-debar"><span class="dot"></span>On a DOL debarment list</a>` : "",
@@ -258,7 +314,7 @@ async function employerPage(id) {
     </section>
     ${debarmentPanel(d.debarments)}
     <div class="tiles">
-      <div class="card tile"><div class="label">Applications</div><div class="value">${n(s.applications)}</div><div class="sub">FY2025 disclosure files</div></div>
+      <div class="card tile"><div class="label">Applications</div><div class="value">${n(s.applications)}</div><div class="sub">${esc(fyRange(d.filing_years))} disclosure files</div></div>
       <div class="card tile"><div class="label">Certified</div><div class="value">${n(s.certified)}</div><div class="sub">${s.applications ? Math.round(100 * s.certified / s.applications) : 0}% of applications</div></div>
       <div class="card tile ${s.cases ? "alert" : ""}"><div class="label">Linked WHD cases</div><div class="value">${n(s.cases)}</div><div class="sub">all years, all laws</div></div>
       <div class="card tile ${s.back_wages ? "good" : ""}"><div class="label">Back wages found</div><div class="value">${compactMoney(s.back_wages)}</div><div class="sub">${money(s.back_wages)}</div></div>
@@ -266,6 +322,9 @@ async function employerPage(id) {
     </div>
 
     ${redFlagsPanel(d.red_flags, e.program)}
+    ${fyears.length > 1 ? `<div class="card panel" style="margin-top:16px" id="emp-years"><h3>Applications by fiscal year</h3>
+      <div class="sub">This employer's applications in each year's DOL disclosure files. Hover a column for its numbers.</div>
+      ${fyColumns(fyears, [["certified", "Certified", ""], ["other", "Not certified (withdrawn, denied or pending)", "s2"]], "Applications per fiscal year")}</div>` : ""}
     ${d.case_years.length ? `<div class="card panel" style="margin-top:16px"><h3>Linked cases by year</h3>
       <div class="sub">Year the WHD findings period ended. Hover a bar for its back wages.</div>${yearColumns(d.case_years)}</div>` : ""}
 
@@ -295,6 +354,9 @@ async function employerPage(id) {
           from ${e.source_urls.split(";").map((u) => `<a href="${esc(u)}" target="_blank" rel="noopener">${esc(u.split("/").pop())}</a>`).join(", ")}</div>
       </div>
     </details>`;
+  const yearsBox = document.getElementById("emp-years");
+  if (yearsBox) bindTips(yearsBox, (i) => `<b>FY${fyears[i].fiscal_year}</b>` + tipRows([["Applications", n(fyears[i].applications)],
+    ["Certified", n(fyears[i].certified)]]));
   window.scrollTo(0, 0);
   loadApplications(id, 1);
 }
@@ -589,10 +651,11 @@ async function loadApplications(id, page) {
   };
   box.innerHTML = d.total ? `
     <div class="table-wrap"><table>
-      <thead><tr><th>Case number</th><th>Status</th><th>Decided</th><th>Job</th><th>Worksite</th><th class="num">Workers</th>
+      <thead><tr><th>Case number</th><th>FY</th><th>Status</th><th>Decided</th><th>Job</th><th>Worksite</th><th class="num">Workers</th>
         <th class="num">Wage offered</th><th class="num">Prevailing wage</th><th>Represented by</th><th>DOL file</th></tr></thead>
       <tbody>${d.rows.map((a) => `<tr>
-        <td class="mono nowrap"><a href="#/application/${esc(a.case_number)}">${esc(a.case_number)}</a></td><td>${statusBadge(a.case_status)}</td>
+        <td class="mono nowrap"><a href="#/application/${esc(a.case_number)}">${esc(a.case_number)}</a></td>
+        <td class="nowrap">${a.fiscal_year ? "FY" + a.fiscal_year : "–"}</td><td>${statusBadge(a.case_status)}</td>
         <td class="nowrap">${day(a.decision_date)}</td>
         <td class="job-cell"><div>${esc(a.job_title || "–")}</div><div class="muted small">${esc(a.soc_title || "")}</div></td>
         <td>${esc(titleCase(a.worksite_city || ""))}${a.worksite_state ? ", " + esc(a.worksite_state) : ""}</td>
@@ -747,7 +810,7 @@ async function watchlistPage(params) {
   const f = {
     program: params.get("program") || "", state: params.get("state") || "", since: params.get("since") || "",
     visa_only: params.get("visa_only") === "1", min_apps: params.get("min_apps") || "1",
-    sector: params.get("sector") || "",
+    sector: params.get("sector") || "", filed: params.get("filed") || "",
   };
   wl.sort = params.get("sort") || "back_wages";
   wl.dir = params.get("dir") === "asc" ? 1 : -1;
@@ -767,6 +830,8 @@ async function watchlistPage(params) {
       <div class="field"><label for="f-since">Cases ending</label><select id="f-since">
         ${[["", "Any year"], ["2020", "2020 or later"], ["2015", "2015 or later"], ["2010", "2010 or later"], ["2005", "2005 or later"]]
           .map(([v, l]) => `<option value="${v}" ${v === f.since ? "selected" : ""}>${l}</option>`).join("")}</select></div>
+      <div class="field"><label for="f-filed">Filed in</label><select id="f-filed"><option value="">Any fiscal year</option>
+        ${[...(state.meta.years || [])].reverse().map((y) => `<option value="${y}" ${String(y) === f.filed ? "selected" : ""}>FY${y}</option>`).join("")}</select></div>
       <div class="field"><label for="f-min">Min. applications</label><input id="f-min" type="number" min="1" step="1" value="${esc(f.min_apps)}" style="width:110px"></div>
       <label class="toggle"><input id="f-visa" type="checkbox" ${f.visa_only ? "checked" : ""}> Only violations of the employer's visa program</label>
       <span class="spacer"></span>
@@ -787,6 +852,7 @@ async function watchlistPage(params) {
   document.getElementById("f-state").addEventListener("change", (e) => go({ state: e.target.value }));
   document.getElementById("f-since").addEventListener("change", (e) => go({ since: e.target.value }));
   document.getElementById("f-sector").addEventListener("change", (e) => go({ sector: e.target.value }));
+  document.getElementById("f-filed").addEventListener("change", (e) => go({ filed: e.target.value }));
   document.getElementById("f-min").addEventListener("change", (e) => go({ min_apps: String(Math.max(1, parseInt(e.target.value, 10) || 1)) }));
   document.getElementById("f-visa").addEventListener("change", (e) => go({ visa_only: e.target.checked ? "1" : "0" }));
 
@@ -1178,7 +1244,7 @@ function redFlagsPanel(flags, program) {
   const bar = (v, cls) => `<span class="rf-track"><span class="rf-fill ${cls}" style="width:${Math.max(1, 100 * v)}%"></span></span>`;
   return `<section class="card panel rf" style="margin-top:16px">
     <h3>Red flags in its applications</h3>
-    <div class="sub">Patterns in this employer's own FY2025 applications that are worth a closer look. None is
+    <div class="sub">Patterns in this employer's own applications, across every fiscal year in the data, that are worth a closer look. None is
       evidence of a violation on its own. Each needs at least ${n(Math.min(...flags.map((f) => f.min_applications)))} applications to count.</div>
     <div class="rf-list">${flags.map((f) => `
       <div class="rf-item">
@@ -1204,7 +1270,7 @@ function debarmentPanel(list) {
     <div class="sub">Debarment is a Department of Labor enforcement finding: the entity may not use the program
       for the period shown. Matched by name${list.some((d) => d.state) ? " and state" : ""}, so confirm it is the same company.</div>
     <div class="table-wrap"><table class="mini debar-table">
-      <thead><tr><th>DOL entry</th><th>Program</th><th>Period</th><th>Status</th><th>Reason</th><th class="num" title="This employer's FY2025 applications decided inside the debarment period">Apps in period</th></tr></thead>
+      <thead><tr><th>DOL entry</th><th>Program</th><th>Period</th><th>Status</th><th>Reason</th><th class="num" title="This employer's applications decided inside the debarment period">Apps in period</th></tr></thead>
       <tbody>${list.map((d) => `<tr>
         <td class="wrap">${esc(d.entity)}${d.location ? `<div class="muted small">${esc(d.location)}</div>` : ""}<div class="muted small">${esc(d.match)}</div></td>
         <td>${esc(d.program)}</td><td class="nowrap">${debarPeriod(d)}</td><td>${debarStatus(d)}</td>
@@ -1228,19 +1294,19 @@ async function debarmentsPage(params) {
     <div class="eyebrow">DOL enforcement</div>
     <h1 class="page-title">Debarments</h1>
     <p class="lede">Employers, agents and labor contractors that the Department of Labor has barred from a visa or
-      labor certification program, from DOL's published lists. Entries are matched to the FY2025 visa filers by
+      labor certification program, from DOL's published lists. Entries are matched to the visa filers by
       cleaned name, and by state when DOL gives one.</p>
     <div class="tiles" style="margin-top:20px">
       <div class="card tile"><div class="label">DOL debarment entries</div><div class="value">${n(all.length)}</div><div class="sub">${progs.map((p) => `${p} ${n(all.filter((d) => d.program === p).length)}`).join(" · ")}</div></div>
       <div class="card tile bad"><div class="label">Active now</div><div class="value">${n(active)}</div><div class="sub">period has not ended</div></div>
-      <div class="card tile ${filing.length ? "bad" : ""}"><div class="label">Match an FY2025 visa filer</div><div class="value">${n(filing.length)}</div><div class="sub">same cleaned name${" "}(and state when given)</div></div>
+      <div class="card tile ${filing.length ? "bad" : ""}"><div class="label">Match a visa filer</div><div class="value">${n(filing.length)}</div><div class="sub">same cleaned name${" "}(and state when given)</div></div>
     </div>
     <div class="chip-row">
       ${["", ...progs].map((p) => `<a class="chip ${p === program ? "active" : ""}" href="#/debarments${p ? "?program=" + p : ""}">${p || "All programs"}</a>`).join("")}
       ${csvLink("/debarments.csv", null, "Download every DOL debarment entry as CSV, with the IDs of matching employers")}
     </div>
     <div class="card"><div class="table-wrap" style="max-height:70vh"><table class="debar-table">
-      <thead><tr><th>DOL entry</th><th>Type</th><th>Program</th><th>Period</th><th>Status</th><th>Reason</th><th>FY2025 visa filer</th></tr></thead>
+      <thead><tr><th>DOL entry</th><th>Type</th><th>Program</th><th>Period</th><th>Status</th><th>Reason</th><th>Visa filer</th></tr></thead>
       <tbody>${rows.sort((a, b) => b.employers.length - a.employers.length || (b.start_date || "").localeCompare(a.start_date || "")).map((d) => `<tr>
         <td class="wrap">${esc(d.entity)}${d.location ? `<div class="muted small">${esc(d.location)}</div>` : ""}</td>
         <td>${esc(d.entity_type)}</td><td>${esc(d.program)}</td><td class="nowrap">${debarPeriod(d)}</td><td>${debarStatus(d)}</td>
@@ -1298,7 +1364,7 @@ async function representativesPage(params) {
   app.innerHTML = `
     <div class="eyebrow">Shared representatives</div>
     <h1 class="page-title">Law firms and agents</h1>
-    <p class="lede">The law firms, agent businesses and individual attorneys or agents named on FY2025 applications,
+    <p class="lede">The law firms, agent businesses and individual attorneys or agents named on the applications,
       across every employer they file for, and how many of those employers have Wage and Hour cases.</p>
     <div class="card filters">
       <div class="field"><label>Show</label><div class="segmented" id="r-kind">${seg("kind", "firm", "Firms and agent businesses", f.kind)}${seg("kind", "person", "Attorneys and agents", f.kind)}</div></div>

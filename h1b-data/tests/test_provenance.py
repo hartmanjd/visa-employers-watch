@@ -5,6 +5,7 @@ Run from the repo root:  python3 -m unittest discover h1b-data/tests
 """
 import csv, io, json, os, sys, tempfile, unittest
 from unittest import mock
+import pandas as pd
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "scripts"))
@@ -135,6 +136,7 @@ class BuildFilersTests(unittest.TestCase):
     def test_reads_the_later_spelling_of_the_dependent_flag(self):
         q4 = os.path.join(self.d, "lca_q4.csv")
         write_csv(q4, [{"CASE_NUMBER": "I-200-9", "CASE_STATUS": "Certified", "VISA_CLASS": "H-1B",
+                        "EMPLOYER_POC_ADDRESS_1": "9 Side St",
                         "EMPLOYER_NAME": "Gamma Co", "EMPLOYER_STATE": "NY", "EMPLOYER_POSTAL_CODE": "10001",
                         "EMPLOYER_FEIN": "", "NAICS_CODE": "", "H_1B_DEPENDENT": "Yes", "WILLFUL_VIOLATOR": "No",
                         "EMPLOYER_ADDRESS1": "", "EMPLOYER_CITY": "", "1ST_PWD_CASE_NUMBER": "P-1"}])
@@ -144,6 +146,30 @@ class BuildFilersTests(unittest.TestCase):
         self.assertEqual([e["h1b_dependent"] for e in read_csv(out) if e["name_clean"] == "GAMMA"], ["True"])
         apps = {a["case_number"]: a for a in read_csv(os.path.join(self.d, "q4_applications.csv"))}
         self.assertEqual((apps["I-200-9"]["pwd_case_number_1"], apps["I-200-1"]["pwd_case_number_1"]), ("P-1", ""))
+        self.assertEqual(apps["I-200-9"]["employer_poc_address1"], "9 Side St")  # FY2021 spelled it ..._ADDRESS_1
+
+    def test_fiscal_year_comes_from_the_file_name_and_the_latest_year_wins(self):
+        fy24 = os.path.join(self.d, "LCA_Disclosure_Data_FY2024_Q4.csv")
+        fy25 = os.path.join(self.d, "LCA_Disclosure_Data_FY2025_Q1.csv")
+        with open(self.q1, newline="") as f:
+            first = next(csv.DictReader(f))
+        write_csv(fy24, [{**first, "EMPLOYER_NAME": "Acme Software Inc", "CASE_NUMBER": "I-100-1"},
+                         {**first, "CASE_NUMBER": "I-200-1"}])  # decided in FY2024, withdrawn in FY2025
+        write_csv(fy25, [{**first, "CASE_STATUS": "Certified - Withdrawn"}])
+        out = os.path.join(self.d, "years.csv")
+        with mock.patch("sys.stdout", io.StringIO()):
+            build_filers.main([out, fy24, fy25])
+        apps = {a["case_number"]: a for a in read_csv(os.path.join(self.d, "years_applications.csv"))}
+        self.assertEqual({k: (a["fiscal_year"], a["case_status"]) for k, a in apps.items()},
+                         {"I-100-1": ("2024", "Certified"), "I-200-1": ("2025", "Certified - Withdrawn")})
+        acme = read_csv(out)
+        self.assertEqual([(e["n_applications"], e["first_fiscal_year"], e["last_fiscal_year"], e["employer_name"])
+                          for e in acme], [("2", "2024", "2025", "Acme Software, LLC")])
+
+    def test_fiscal_year_falls_back_to_the_decision_date(self):
+        self.assertEqual(build_filers.fiscal_year("H-2B_Disclosure_Data_FY16.xlsx", None), "2016")
+        got = build_filers.fiscal_year("lca.csv", pd.Series(["2024-09-30", "2024-10-01", ""]))
+        self.assertEqual(list(got), ["2024", "2025", ""])
 
     def test_both_tables_have_manifests_with_inputs(self):
         for name in ("filers.csv", "filers_applications.csv"):
