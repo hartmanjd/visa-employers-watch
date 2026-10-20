@@ -402,6 +402,15 @@ class OshaQueryTests(unittest.TestCase):
         self.assertEqual((o["employers"], o["employers_with_whd"], o["inspections"], o["violations"], o["deaths"]),
                          (2, 2, 2, 3, 1))
 
+    def test_osha_overview_follows_filters(self):
+        # Both of Acme's rows link to the same two inspections; they are counted once.
+        o = queries.osha_overview(self.con, program="H-1B")
+        self.assertEqual((o["employers"], o["inspections"], o["violations"], o["deaths"]), (1, 2, 3, 1))
+        self.assertEqual(o["penalties"], queries.osha_overview(self.con)["penalties"])
+        o = queries.osha_overview(self.con, state="CA")
+        self.assertEqual((o["employers"], o["inspections"], o["violations"], o["penalties"], o["deaths"]),
+                         (0, 0, 0, 0, 0))
+
 
 if __name__ == "__main__":
     unittest.main()
