@@ -591,10 +591,10 @@ async function safetyPage(params) {
   }
   sf.page = Math.max(1, parseInt(params.get("page"), 10) || 1);
   const t = sf.totals || {}, rows = sf.rows;
-  const sum = (k) => rows.reduce((a, r) => a + (r[k] || 0), 0);
+  const filtered = f.program || f.state || f.sector || f.with_whd;
   document.getElementById("sf-tiles").innerHTML = `
     <div class="card tile"><div class="label">Employers shown</div><div class="value">${n(rows.length)}</div><div class="sub">${n(rows.filter((r) => r.whd_cases).length)} with WHD cases too</div></div>
-    <div class="card tile"><div class="label">Inspections</div><div class="value">${n(t.inspections)}</div><div class="sub">linked to any visa employer</div></div>
+    <div class="card tile"><div class="label">Inspections</div><div class="value">${n(t.inspections)}</div><div class="sub">${filtered ? "linked to these employers" : "linked to any visa employer"}</div></div>
     <div class="card tile alert"><div class="label">Citation items</div><div class="value">${n(t.violations)}</div><div class="sub">deleted items left out</div></div>
     <div class="card tile bad"><div class="label">OSHA penalties</div><div class="value">${compactMoney(t.penalties)}</div><div class="sub">${money(t.penalties)}</div></div>
     <div class="card tile bad"><div class="label">Workers killed</div><div class="value">${n(t.deaths)}</div><div class="sub">in accidents tied to inspections</div></div>`;

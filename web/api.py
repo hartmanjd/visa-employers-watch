@@ -215,15 +215,15 @@ def watchlist(program: str | None = None, state: str | None = None,
 @app.get("/api/osha")
 def osha(program: str | None = None, state: str | None = None, sector: str | None = None, with_whd: bool = False,
          min_apps: int = Query(1, ge=1)):
-    """Visa employers with linked OSHA inspections, and OSHA totals across all visa employers."""
+    """Visa employers with linked OSHA inspections, and OSHA totals across the employers listed."""
     check_program(program)
     if sector and sector not in q.SECTORS:
         raise HTTPException(422, "Unknown sector")
     c = con()
     try:
-        return {"rows": q.osha_watchlist(c, program=program or None, state=state or None, sector=sector or None,
-                                         with_whd=with_whd, min_applications=min_apps),
-                "totals": q.osha_overview(c)}
+        filters = dict(program=program or None, state=state or None, sector=sector or None, with_whd=with_whd,
+                       min_applications=min_apps)
+        return {"rows": q.osha_watchlist(c, **filters), "totals": q.osha_overview(c, **filters)}
     finally:
         c.close()
 

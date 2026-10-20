@@ -1324,11 +1324,8 @@ def osha_inspections(con, employer_id):
     return out
 
 
-def osha_watchlist(con, program=None, state=None, sector=None, with_whd=False, min_applications=1):
-    """Visa employers with linked OSHA inspections, one row per employer, most penalties first, with the
-    totals of their linked WHD cases beside them. `with_whd` keeps employers that also have WHD cases."""
-    if not osha_ready(con):
-        return []
+def _osha_filter(program=None, state=None, sector=None, with_whd=False, min_applications=1):
+    """WHERE clause and arguments over `employers e` for the Safety page's filters."""
     where, args = ["e.n_applications >= ?"], [min_applications]
     if program:
         where.append("e.program = ?")
@@ -1343,7 +1340,16 @@ def osha_watchlist(con, program=None, state=None, sector=None, with_whd=False, m
         where.append("(" + " OR ".join("e.naics LIKE ?" for _ in prefixes) + ")")
         args += [f"{p}%" for p in prefixes]
     if with_whd:
-        where.append("w.n_cases > 0")
+        where.append("EXISTS (SELECT 1 FROM matches mw WHERE mw.employer_id = e.employer_id)")
+    return " AND ".join(where), args
+
+
+def osha_watchlist(con, program=None, state=None, sector=None, with_whd=False, min_applications=1):
+    """Visa employers with linked OSHA inspections, one row per employer, most penalties first, with the
+    totals of their linked WHD cases beside them. `with_whd` keeps employers that also have WHD cases."""
+    if not osha_ready(con):
+        return []
+    where, args = _osha_filter(program, state, sector, with_whd, min_applications)
     return rows(con, f"""
         SELECT e.employer_id, e.employer_name, e.dba, e.city, e.state, e.program, e.naics, e.n_applications,
                o.inspections, o.zip_links, o.inspections_with_violations, o.violations, o.serious, o.willful,
@@ -1352,23 +1358,45 @@ def osha_watchlist(con, program=None, state=None, sector=None, with_whd=False, m
         FROM osha_employer_totals o JOIN employers e USING (employer_id)
         LEFT JOIN (SELECT m.employer_id, COUNT(*) AS n_cases, COALESCE(SUM(v.bw_atp_amt), 0) AS back_wages
                    FROM matches m JOIN violation_cases v USING (case_id) GROUP BY m.employer_id) w USING (employer_id)
-        WHERE {" AND ".join(where)}
+        WHERE {where}
         ORDER BY o.penalties DESC, o.violations DESC, e.employer_id""", *args)
 
 
-def osha_overview(con):
-    """Headline OSHA numbers across visa employers, counting each inspection once, or None without OSHA data."""
+def osha_overview(con, **filters):
+    """Headline OSHA numbers, counting each inspection once, or None without OSHA data.
+
+    With no filters they cover every visa employer; with the filters of `osha_watchlist` they cover
+    the inspections linked to the employers it lists. An inspection can link to several employer rows,
+    so adding up the watchlist rows would count it more than once.
+    """
     if not osha_ready(con):
         return None
-    return rows(con, """
-        SELECT (SELECT COUNT(*) FROM osha_employer_totals) AS employers,
-               (SELECT COUNT(*) FROM osha_employer_totals o WHERE EXISTS
-                   (SELECT 1 FROM matches m WHERE m.employer_id = o.employer_id)) AS employers_with_whd,
-               (SELECT COUNT(*) FROM osha_inspections) AS inspections,
-               (SELECT COUNT(*) FROM osha_violations WHERE COALESCE(delete_flag, '') != 'X') AS violations,
-               (SELECT COALESCE(SUM(current_penalty), 0) FROM osha_violations WHERE COALESCE(delete_flag, '') != 'X') AS penalties,
-               (SELECT COUNT(*) FROM osha_injuries WHERE degree_of_inj = 1) AS deaths,
-               (SELECT MIN(open_date) FROM osha_inspections) AS since""")[0]
+    if not any(v for k, v in filters.items() if k != "min_applications") and filters.get("min_applications", 1) <= 1:
+        return rows(con, """
+            SELECT (SELECT COUNT(*) FROM osha_employer_totals) AS employers,
+                   (SELECT COUNT(*) FROM osha_employer_totals o WHERE EXISTS
+                       (SELECT 1 FROM matches m WHERE m.employer_id = o.employer_id)) AS employers_with_whd,
+                   (SELECT COUNT(*) FROM osha_inspections) AS inspections,
+                   (SELECT COUNT(*) FROM osha_violations WHERE COALESCE(delete_flag, '') != 'X') AS violations,
+                   (SELECT COALESCE(SUM(current_penalty), 0) FROM osha_violations WHERE COALESCE(delete_flag, '') != 'X') AS penalties,
+                   (SELECT COUNT(*) FROM osha_injuries WHERE degree_of_inj = 1) AS deaths,
+                   (SELECT MIN(open_date) FROM osha_inspections) AS since""")[0]
+    where, args = _osha_filter(**filters)
+    return rows(con, f"""
+        WITH emp AS (SELECT e.employer_id FROM osha_employer_totals o JOIN employers e USING (employer_id)
+                     WHERE {where}),
+             ins AS (SELECT DISTINCT activity_nr FROM osha_matches WHERE employer_id IN (SELECT employer_id FROM emp))
+        SELECT (SELECT COUNT(*) FROM emp) AS employers,
+               (SELECT COUNT(*) FROM emp WHERE EXISTS
+                   (SELECT 1 FROM matches m WHERE m.employer_id = emp.employer_id)) AS employers_with_whd,
+               (SELECT COUNT(*) FROM ins) AS inspections,
+               (SELECT COUNT(*) FROM osha_violations WHERE COALESCE(delete_flag, '') != 'X'
+                   AND activity_nr IN (SELECT activity_nr FROM ins)) AS violations,
+               (SELECT COALESCE(SUM(current_penalty), 0) FROM osha_violations WHERE COALESCE(delete_flag, '') != 'X'
+                   AND activity_nr IN (SELECT activity_nr FROM ins)) AS penalties,
+               (SELECT COUNT(*) FROM osha_injuries WHERE degree_of_inj = 1
+                   AND rel_insp_nr IN (SELECT activity_nr FROM ins)) AS deaths,
+               (SELECT MIN(open_date) FROM osha_inspections WHERE activity_nr IN (SELECT activity_nr FROM ins)) AS since""", *args)[0]
 
 
 # ---------- Summary tables ----------

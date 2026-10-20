@@ -214,6 +214,8 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(d["totals"]["inspections"], 2)
         self.assertEqual(len(self.client.get("/api/osha", params={"program": "H-2B", "with_whd": "true"}).json()["rows"]), 1)
         self.assertEqual(self.client.get("/api/osha", params={"sector": "99"}).status_code, 422)
+        t = self.client.get("/api/osha", params={"state": "CA"}).json()["totals"]
+        self.assertEqual((t["employers"], t["inspections"], t["penalties"]), (0, 0, 0))
 
     def test_debarments_csv(self):
         _, rows = self.csv_rows("/api/debarments.csv")
