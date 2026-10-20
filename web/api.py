@@ -4,12 +4,12 @@ Run from the repo root:  uvicorn web.api:app
 Then open http://localhost:8000. Reads h1b-data/research.db (or RESEARCH_DB), read-only, and
 downloads it on first start if it is missing (see dashboard/queries.py).
 """
-import csv, io, json, os, queue, sys, threading
+import csv, io, os, sys, threading
 from contextlib import asynccontextmanager
 from functools import lru_cache
 
-from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import Response, StreamingResponse
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.join(HERE, "..", "dashboard"))
 import queries as q  # noqa: E402
 sys.path.insert(0, os.path.join(HERE, ".."))
 from chat.mcp_server import router as mcp_router  # noqa: E402
-from chat import engine, limits  # noqa: E402
+from chat import engine  # noqa: E402
 
 PAGE_SIZE = 100
 SITE_URL = engine.SITE_URL
@@ -395,93 +395,6 @@ def debarments_csv():
     """Every DOL debarment entry, with the IDs of the visa employers that match it."""
     rows = [dict(d, matched_employer_ids=[e["employer_id"] for e in d["employers"]]) for d in _debarments()]
     return csv_response(rows, DEBARMENTS_CSV, "dol-debarments.csv")
-
-
-# ---------- Ask: questions answered by Claude from the database ----------
-MAX_QUESTION = 600
-MAX_HISTORY = 6  # earlier messages sent back with a follow-up (three questions and their answers)
-MAX_TURN = 4000
-spend = limits.SpendCap(path=os.environ.get("CHAT_SPEND_FILE", "/tmp/visa-chat-spend.json"))
-rate = limits.RateLimit()
-_client = None
-
-
-def chat_client():
-    """The Anthropic client, or None when no API key is set."""
-    global _client
-    if _client is None and os.environ.get("ANTHROPIC_API_KEY"):
-        import anthropic
-        _client = anthropic.Anthropic()
-    return _client
-
-
-def visitor(request):
-    """The visitor's IP address. Render puts the real one first in X-Forwarded-For."""
-    fwd = request.headers.get("x-forwarded-for", "")
-    return fwd.split(",")[0].strip() or (request.client.host if request.client else "unknown")
-
-
-@app.get("/api/ask")
-def ask_status():
-    """Whether the Ask page can take questions right now."""
-    if not chat_client():
-        return {"enabled": False, "reason": "not_set_up"}
-    if spend.left() < limits.RESERVE_USD:
-        return {"enabled": False, "reason": "daily_limit"}
-    return {"enabled": True, "model": engine.MODEL}
-
-
-@app.post("/api/ask")
-def ask(body: dict, request: Request):
-    """Answer one question, streamed as JSON lines: a "tool" line as each lookup starts, then one
-    "answer" line (or an "error" line). `history` holds earlier questions and answers as plain text."""
-    question = str(body.get("question") or "").strip()
-    if not question or len(question) > MAX_QUESTION:
-        raise HTTPException(422, f"Ask a question of up to {MAX_QUESTION} characters.")
-    history = body.get("history") or []
-    if not isinstance(history, list):
-        raise HTTPException(422, "history must be a list")
-    history = [{"role": m.get("role"), "content": str(m.get("content") or "")[:MAX_TURN]}
-               for m in history[-MAX_HISTORY:] if isinstance(m, dict)]
-    while history and history[0]["role"] != "user":
-        history = history[1:]
-    if any(m["role"] != ("user", "assistant")[i % 2] or not m["content"] for i, m in enumerate(history)) \
-            or len(history) % 2:
-        raise HTTPException(422, "history must alternate question and answer")
-    client = chat_client()
-    if not client:
-        raise HTTPException(503, "The Ask page isn't set up on this server yet.")
-    wait = rate.check(visitor(request))
-    if wait:
-        raise HTTPException(429, wait)
-    if not spend.reserve():
-        raise HTTPException(503, "Today's question budget is used up. It resets at midnight UTC.")
-
-    events = queue.Queue()
-
-    def work():
-        c, cost = con(), 0.0
-        try:
-            r = engine.answer(c, question, history, client=client, on_event=events.put)
-            cost = r["cost_usd"]
-            events.put({"type": "answer", **{k: r[k] for k in ("answer", "raw", "citations", "unverified", "tool_calls",
-                                                               "stop_reason", "model")}})
-        except Exception as e:  # the API failing, timing out or rejecting the key
-            events.put({"type": "error", "message": "The answer couldn't be finished. Please try again.",
-                        "detail": type(e).__name__})
-        finally:
-            spend.settle(cost)
-            c.close()
-            events.put(None)
-
-    threading.Thread(target=work, daemon=True).start()
-
-    def stream():
-        while (ev := events.get()) is not None:
-            yield json.dumps(ev, default=str) + "\n"
-
-    return StreamingResponse(stream(), media_type="application/x-ndjson",
-                             headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
 
 
 def _page(name, media_type):
